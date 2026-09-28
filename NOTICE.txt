@@ -1,0 +1,8 @@
+App Prompt Builder
+Copyright 2026 Hasitha Aravinda
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It has no third-party code: the page is plain HTML, CSS and JavaScript with no dependencies. The prompts and code it
+generates name third-party software (Ballerina packages, the bal-commons components, identity providers, Docker
+images); each keeps its own license.
