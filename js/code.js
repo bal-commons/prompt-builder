@@ -28,14 +28,16 @@ export function names(state) {
 }
 
 const lit = (value) => JSON.stringify(String(value));
+const capitalA = (word) => (/^[aeiou]/i.test(word) ? "An " : "A ") + word;
+const an = (word) => (/^[aeiou]/i.test(word) ? "an " : "a ") + word;
 const roleList = (roles) => roles.length === 1 ? lit(roles[0]) : `[${roles.map(lit).join(", ")}]`;
 
 function has(state, id) {
-  return enabledServices(state).includes(id);
+  return id === "app" || enabledServices(state).includes(id);
 }
 
 function agentOn(state) {
-  return state.agent.on && enabledServices(state).length > 0;
+  return state.agent.on;
 }
 
 // The activities that can run with the services on; an activity needs its service.
@@ -108,7 +110,7 @@ export function configBal(state) {
 
 export function typesBal(state) {
   const n = names(state);
-  let out = `# A ${n.object}, as the app stores it.
+  let out = `# ${capitalA(n.object)}, as the app stores it.
 type ${n.type} record {|
     string id;
     string ownerId;
@@ -120,7 +122,7 @@ type ${n.type} record {|
     string createdAt;
 |};
 
-# What a user sends to open a ${n.object}.
+# What a user sends to open ${an(n.object)}.
 type ${n.newType} record {|
     string title;
     string details = "";
@@ -332,7 +334,7 @@ service http:InterceptableService /app on appListener {
     public function createInterceptors() returns [sauth:AuthInterceptor, service_commons:ErrorInterceptor] =>
         [new (authenticator, tickets), new];
 
-    // Opens a ${n.object}${chat ? ": the user's conversation" : ""}${agent ? `${chat ? "," : ":"} then the durable agent that owns it` : ""}.
+    // Opens ${an(n.object)}${chat ? ": the user's conversation" : ""}${agent ? `${chat ? "," : ":"} then the durable agent that owns it` : ""}.
     resource function post ${n.path}(http:RequestContext ctx, @http:Payload ${n.newType} body)
             returns http:Created|http:BadRequest|error {
         sauth:CallerIdentity caller = check sauth:callerOf(ctx);
@@ -496,6 +498,7 @@ ${decls.join(",\n")}
 }
 
 const ACTIVITY_DESCRIPTIONS = {
+  updateStatus: "Sets the status of the business object the correlationId names, e.g. APPROVED, REJECTED or DONE.",
   notifyUser: "Notifies one user through their personal inbox. severity is INFO, WARNING, ERROR or SUCCESS (optional).",
   notifyRole: "Notifies everyone holding a role through their inbox. severity is INFO, WARNING, ERROR or SUCCESS (optional).",
   sendMessage: "Sends a chat message in the conversation about the correlationId.",
@@ -525,6 +528,18 @@ export function activitiesBal(state) {
   }
   if (acts.includes("requestUpload") || acts.includes("closeCase")) {
     imports.add("import commons/attachment;");
+  }
+  if (acts.includes("updateStatus")) {
+    blocks.push(`@workflow:Activity
+function updateStatus(string correlationId, string status) returns string|error {
+    string id = re \`/\`.split(correlationId)[0];
+    string value = status.trim().toUpperAscii();
+    if value == "" {
+        return error("status is required, e.g. APPROVED or DONE");
+    }
+    check setStatus(id, value);
+    return string \`\${id} is now \${value}\`;
+}`);
   }
   for (const [role, kind] of [["notifyUser", "USER"], ["notifyRole", "ROLE"]]) {
     if (!acts.includes(role)) continue;

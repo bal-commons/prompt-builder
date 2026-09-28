@@ -1,83 +1,136 @@
+import {componentName} from "./catalog.js";
 import {names} from "./code.js";
+import {component, HUB_PANES, pageComponents} from "./state.js";
 
-// Simple wireframes of the app's screens, as SVG boxes. Layout only; the components bring their own look.
+// Wireframes of the app's screens as SVG boxes: layout only, the components bring their own look.
 
 const W = 800;
 const H = 480;
 
-function on(state, id, tag) {
-  return state.services[id]?.on && (!tag || state.services[id].components.includes(tag));
+// What a component's box says inside, line by line.
+function sketch(state, id) {
+  const n = names(state);
+  const lines = {
+    "bell": ["🔔 ②"],
+    "inbox": ["All | Personal | Roles   ☐ Unread  severity ▾", "● WARNING  Needs attention …", "● INFO     New " + n.object + " …", "  SUCCESS  Done …"],
+    "conversation-list": ["[ search ]", "title · 2 unread", "title", "title"],
+    "conversation": ["agent: streamed reply …", "              you: …", "form: [field] [field] Send", "[ message …        ] Send"],
+    "upload-case": ["Files 1/3 · image/*   [▢][▢]", "┆ Drop files here or choose ┆", "[ Submit ]"],
+    "case-list": ["title · Needs your upload", "▓▓▓▓░░ 2/3 slots", "title · submitted"],
+    "file-viewer": ["[img] [img] [PDF]", "Download · Delete"],
+    "item-form": ["[ title ]", "[ details … ]", "[ Open ]"],
+    "item-list": [`${n.idPrefix}-1002 · title · OPEN`, `${n.idPrefix}-1001 · title · DONE`, "…"],
+    "item-detail": ["title · status", "fields · owner · dates"],
+    "approvals": ["action · arguments", "[ comment ]  Approve  Reject"],
+    "stats": ["[ 12 open ]  [ 4 waiting ]  [ 31 done ]"],
+    "user-menu": ["user ▾"]
+  }[id];
+  return lines ?? [component(state, id)?.description ?? ""];
 }
 
-// The screens the app will have, each as a list of regions.
+function label(state, id) {
+  const c = component(state, id);
+  if (!c) return id;
+  return c.tag ? `<${c.tag}>` : c.app ? componentName(c, state.app.object) : c.name;
+}
+
+function kind(state, id) {
+  const c = component(state, id);
+  return c?.tag ? "component" : c?.app ? "app" : "custom";
+}
+
+// Boxes stacked in a column, sized by weight (a conversation gets twice the room).
+function column(state, ids, x, y, w, h) {
+  if (!ids.length) {
+    return [box(x, y, w, h, "(empty column)", "empty", [])];
+  }
+  const weights = ids.map((id) => component(state, id)?.weight ?? 1);
+  const total = weights.reduce((a, b) => a + b, 0);
+  const gap = 10;
+  const free = h - gap * (ids.length - 1);
+  let top = y;
+  return ids.map((id, i) => {
+    const height = Math.max(40, free * weights[i] / total);
+    const b = box(x, top, w, height, label(state, id), kind(state, id), sketch(state, id));
+    top += height + gap;
+    return b;
+  });
+}
+
+function body(state, page, x, y, w, h) {
+  const cols = pageComponents(page);
+  if (cols.length === 1) {
+    return column(state, cols[0], x, y, w, h);
+  }
+  const gap = 12;
+  const left = Math.round((w - gap) * page.ratio / 100);
+  const regions = [...column(state, cols[0], x, y, left, h), ...column(state, cols[1], x + left + gap, y, w - left - gap, h)];
+  if (page.collapsible) {
+    regions.push(box(x + left - 22, y + 4, 18, 18, "‹", "toggle", []));
+  }
+  return regions;
+}
+
+function headerLine(state) {
+  return state.header.map((id) => id === "bell" ? "🔔②" : id === "user-menu" ? "user ▾" : component(state, id)?.name ?? id).join("   ");
+}
+
 export function screens(state) {
-  const n = names(state);
-  const hub = state.frontend.layout === "hub";
-  const approval = state.agent.on && state.agent.approval.on;
+  const shell = state.layout.shell;
   const list = [];
-  const itemLabel = n.path[0].toUpperCase() + n.path.slice(1);
+  const hubPanes = shell === "hub" ? state.layout.hubPanes.map((p) => ({pane: p,
+    name: {inbox: "Notifications", chats: "Chats", files: "Files"}[p] + " (hub)"})) : [];
+  const navItems = [...hubPanes.map((p) => p.name), ...state.pages.map((p) => p.title)];
 
-  const itemsBody = (x, y, w, h) => [
-    box(x, y, w * 0.36, h, `${itemLabel} list`, "list", ["+ New " + n.object, "status · date", "status · date", "status · date"]),
-    box(x + w * 0.38, y, w * 0.62, h * 0.32, `${capital(n.object)} detail`, "panel", ["title, status, fields"]),
-    ...(on(state, "chat", "commons-conversation") ? [box(x + w * 0.38, y + h * 0.35, w * 0.62, h * 0.65, "<commons-conversation>", "component", ["agent: streamed reply", "form / upload card", "[ message …        ] Send"])] : [])
-  ];
-  const inboxBody = (x, y, w, h) => [box(x, y, w, h, "<commons-inbox show-filters>", "component",
-    ["All | Personal | Roles   ☐ Unread  severity ▾   Mark all read", "● WARNING  No reply yet …", "● INFO     New " + n.object + " …", "  SUCCESS  Resolved …"])];
-  const chatsBody = (x, y, w, h) => [
-    ...(on(state, "chat", "commons-conversation-list") ? [box(x, y, w * 0.34, h, "<commons-conversation-list searchable>", "component", ["[ search ]", "title · 2 unread", "title", "title"])] : []),
-    ...(on(state, "chat", "commons-conversation") ? [box(x + w * 0.36, y, w * 0.64, h, "<commons-conversation>", "component", ["agent: …", "              you: …", "form: [field] [field] Send", "[ message …        ] Send"])] : [])
-  ];
-  const filesBody = (x, y, w, h) => [
-    ...(on(state, "attachment", "commons-case-list") ? [box(x, y, w * 0.34, h, "<commons-case-list>", "component", ["title · Needs your upload", "▓▓▓▓░░ 2/3 slots", "title · submitted"])] : []),
-    ...(on(state, "attachment", "commons-upload-case") ? [box(x + w * 0.36, y, w * 0.64, h * 0.55, "<commons-upload-case>", "component", ["Photos 1/3 · image/*   [▢][▢]", "┆ Drop files here or choose ┆", "[ Submit ]"])] : []),
-    ...(on(state, "attachment", "commons-file-viewer") ? [box(x + w * 0.36, y + h * 0.58, w * 0.64, h * 0.42, "<commons-file-viewer>", "component", ["[img] [img] [PDF]  Download · Delete"])] : [])
-  ];
-  const reviewsBody = (x, y, w, h) => [box(x, y, w, h, "Approvals", "list",
-    [`${state.agent.approval.activity} · ${n.object} ${n.idPrefix}-1001`, "arguments the agent proposed", "[ comment ]  Approve  Reject"])];
-
-  const pages = [[itemLabel, itemsBody]];
-  if (on(state, "notification", "commons-inbox")) pages.push(["Notifications", inboxBody]);
-  if (on(state, "chat")) pages.push(["Chats", chatsBody]);
-  if (on(state, "attachment")) pages.push(["Files", filesBody]);
-  if (approval) pages.push(["Approvals", reviewsBody]);
-
-  for (const [name, body] of pages) {
+  const frame = (current, content) => {
     const regions = [];
-    if (hub) {
-      regions.push(box(0, 0, 170, H, "<commons-hub> rail", "nav", [state.app.name, ...pages.map(([p]) => (p === name ? "▸ " : "  ") + p + (p === "Notifications" || p === "Chats" ? "  ②" : "")), "", "", "user ▾"]));
-      regions.push(...body(186, 16, W - 202, H - 32));
+    if (shell === "top") {
+      regions.push(box(0, 0, W, 48, state.app.name, "nav", [`${navItems.map((t) => t === current ? `[${t}]` : t).join("   ")}        ${headerLine(state)}`]));
+      regions.push(...content(16, 64, W - 32, H - 80));
     } else {
-      regions.push(box(0, 0, W, 48, "Header", "nav", [`${state.app.name}    ${pages.map(([p]) => p).join("  ·  ")}    ${on(state, "notification", "commons-notification-bell") ? "🔔②" : ""}  user ▾`]));
-      regions.push(...body(16, 64, W - 32, H - 80));
+      const rail = shell === "hub" ? 170 : 160;
+      regions.push(box(0, 0, rail, H, shell === "hub" ? "<commons-hub> rail" : state.app.name, "nav",
+        [...navItems.map((t) => (t === current ? "▸ " : "  ") + t), "", state.layout.collapsible && shell === "sidebar" ? "« collapse" : ""]));
+      regions.push(box(rail, 0, W - rail, 44, shell === "hub" ? "" : `${current}      ${headerLine(state)}`, "nav", []));
+      regions.push(...content(rail + 16, 58, W - rail - 32, H - 74));
     }
-    list.push({name, regions});
+    return regions;
+  };
+
+  for (const p of hubPanes) {
+    const ids = HUB_PANES[p.pane];
+    const split = {layout: ids.length > 1 ? "split" : "single", ratio: 35, collapsible: false,
+      columns: ids.length > 1 ? [[ids[0]], ids.slice(1)] : [ids, []]};
+    list.push({name: p.name, regions: frame(p.name, (x, y, w, h) => body(state, split, x, y, w, h))});
+  }
+  for (const page of state.pages) {
+    list.push({name: page.title, regions: frame(page.title, (x, y, w, h) => body(state, page, x, y, w, h))});
+  }
+  if (shell !== "hub" && state.header.includes("bell") && state.bell.opens === "drawer" && state.pages.length) {
+    const first = state.pages[0];
+    const regions = frame(first.title, (x, y, w, h) => body(state, first, x, y, w, h))
+      .map((r) => ({...r, kind: r.kind === "nav" ? "nav" : "dim"}));
+    regions.push(box(W - 330, 44, 330, H - 44, "Drawer: <commons-inbox>", "component", sketch(state, "inbox")));
+    list.push({name: "Bell → drawer", regions});
   }
   return list;
 }
 
-function box(x, y, w, h, label, kind, lines = []) {
-  return {x, y, w, h, label, kind, lines};
+function box(x, y, w, h, text, kind, lines = []) {
+  return {x, y, w, h, label: text, kind, lines};
 }
 
-const capital = (s) => s[0].toUpperCase() + s.slice(1);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;"}[c]));
 
 export function svg(screen) {
   const parts = screen.regions.map((r) => {
-    const fill = {nav: "var(--wf-nav)", component: "var(--wf-component)", list: "var(--wf-panel)", panel: "var(--wf-panel)"}[r.kind];
-    const lines = r.lines.map((line, i) => `<text x="${r.x + 10}" y="${r.y + 40 + i * 20}" class="wf-line">${esc(line)}</text>`).join("");
+    const fill = {nav: "var(--wf-nav)", component: "var(--wf-component)", app: "var(--wf-panel)", custom: "var(--wf-custom)",
+      empty: "none", toggle: "var(--wf-nav)", dim: "var(--wf-dim)"}[r.kind];
+    const max = Math.max(0, Math.floor((r.h - 30) / 18));
+    const lines = r.lines.slice(0, max).map((line, i) => `<text x="${r.x + 10}" y="${r.y + 38 + i * 18}" class="wf-line">${esc(line)}</text>`).join("");
     return `<g><rect x="${r.x + 1}" y="${r.y + 1}" width="${r.w - 2}" height="${r.h - 2}" rx="6" fill="${fill}" class="wf-box ${r.kind}"/>
-      <text x="${r.x + 10}" y="${r.y + 20}" class="wf-label">${esc(r.label)}</text>${lines}</g>`;
+      <text x="${r.x + (r.kind === "toggle" ? 5 : 10)}" y="${r.y + (r.kind === "toggle" ? 14 : 20)}" class="wf-label">${esc(r.label)}</text>${lines}</g>`;
   }).join("");
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Wireframe: ${esc(screen.name)}" xmlns="http://www.w3.org/2000/svg">
     <rect width="${W}" height="${H}" fill="var(--wf-bg)"/>${parts}</svg>`;
-}
-
-// A text version of the screens, for the prompts.
-export function describePages(state) {
-  return screens(state).map((s) => ({
-    name: s.name,
-    description: s.regions.filter((r) => r.kind !== "nav").map((r) => `- ${r.label}: ${r.lines.join(" / ")}`).join("\n")
-  }));
 }

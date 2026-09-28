@@ -1,7 +1,9 @@
-import {ACTIVITIES, ASSISTANTS, DATABASES, DOCS, docUrl, FRAMEWORKS, IDPS, SERVICES} from "./catalog.js";
+import {ACTIVITIES, ASSISTANTS, COMPONENTS, componentName, componentSummary, DATABASES, DOCS, docUrl, FRAMEWORKS, IDPS,
+  LAYOUTS, SERVICES} from "./catalog.js";
 import {files} from "./code.js";
 import {prompts} from "./prompts.js";
-import {decode, defaults, encode} from "./state.js";
+import {component, decode, defaults, encode, fromTemplate, HUB_PANES, newId, usedComponents} from "./state.js";
+import {TEMPLATES} from "./templates.js";
 import {screens, svg} from "./wireframe.js";
 import {zip} from "./zip.js";
 
@@ -20,7 +22,7 @@ function h(tag, attrs = {}, ...children) {
     else if (["value", "checked", "selected", "disabled", "open"].includes(key) || (key in node && typeof value !== "string")) node[key] = value;
     else node.setAttribute(key, value === true ? "" : value);
   }
-  for (const child of children.flat()) {
+  for (const child of children.flat(Infinity)) {
     if (child !== null && child !== undefined && child !== false) node.append(child.nodeType ? child : String(child));
   }
   return node;
@@ -94,64 +96,193 @@ const toggleIn = (arr, value, on) => on ? [...new Set([...arr, value])] : arr.fi
 
 function step(n, title, note, ...body) {
   const id = `step-${n}`;
-  const open = renderForm.open?.[id] ?? n <= 2;
+  const open = renderForm.open?.[id] ?? n <= 4;
   return h("details", {class: "step", open, ontoggle: (e) => { (renderForm.open ??= {})[id] = e.target.open; }},
     h("summary", {}, h("span", {class: "num"}, n), title, note ? h("span", {class: "summary-note"}, note) : null),
     h("div", {class: "step-body"}, ...body));
+}
+
+const object = () => state.app.object || "item";
+const label = (c) => c.tag ? `${c.name}` : c.app ? componentName(c, object()) : c.name;
+
+// Components that can go on a page, grouped for the "Add" menu.
+function addable() {
+  const groups = SERVICES.map((svc) => [svc.name, COMPONENTS.filter((c) => c.service === svc.id && !c.header)]);
+  groups.push(["The app's own", COMPONENTS.filter((c) => c.app && !c.header)]);
+  if (state.custom.length) groups.push(["Custom", state.custom]);
+  return groups;
+}
+
+function columnEditor(pageIndex, colIndex, heading) {
+  const page = state.pages[pageIndex];
+  const single = page.layout !== "split";
+  const ids = single ? [...page.columns[0], ...page.columns[1]] : page.columns[colIndex];
+  const write = (x, next) => {
+    const p = x.pages[pageIndex];
+    if (single) p.columns = [next, []];
+    else p.columns[colIndex] = next;
+  };
+  const move = (i, d) => change((x) => { const next = [...ids]; [next[i], next[i + d]] = [next[i + d], next[i]]; write(x, next); }, true);
+  return h("div", {class: "col-edit"},
+    h("span", {class: "col-head"}, heading),
+    h("ol", {}, ids.map((id, i) => {
+      const c = component(state, id);
+      return h("li", {}, h("span", {class: "col-name", title: c ? componentSummary(c, object()) : id}, c ? label(c) : id),
+        h("button", {type: "button", class: "icon", "aria-label": "Move up", disabled: i === 0, onclick: () => move(i, -1)}, "↑"),
+        h("button", {type: "button", class: "icon", "aria-label": "Move down", disabled: i === ids.length - 1, onclick: () => move(i, 1)}, "↓"),
+        h("button", {type: "button", class: "icon", "aria-label": `Remove ${c ? label(c) : id}`,
+          onclick: () => change((x) => write(x, ids.filter((_, j) => j !== i)), true)}, "✕"));
+    })),
+    h("select", {"aria-label": `Add a component to ${heading}`, onchange: (e) => {
+      const id = e.target.value;
+      if (id) change((x) => write(x, [...ids, id]), true);
+    }}, h("option", {value: ""}, "+ Add a component…"),
+    addable().map(([group, list]) => h("optgroup", {label: group},
+      list.map((c) => h("option", {value: c.id, disabled: ids.includes(c.id)}, label(c)))))));
+}
+
+function pageEditor(page, i) {
+  const s = state;
+  const split = page.layout === "split";
+  return h("div", {class: "page-edit"},
+    h("div", {class: "page-top"},
+      h("input", {type: "text", value: page.title, "aria-label": "Page title",
+        oninput: (e) => change((x) => { x.pages[i].title = e.target.value; })}),
+      h("button", {type: "button", class: "icon", "aria-label": "Move page up", disabled: i === 0,
+        onclick: () => change((x) => { [x.pages[i - 1], x.pages[i]] = [x.pages[i], x.pages[i - 1]]; }, true)}, "↑"),
+      h("button", {type: "button", class: "icon", "aria-label": "Move page down", disabled: i === s.pages.length - 1,
+        onclick: () => change((x) => { [x.pages[i + 1], x.pages[i]] = [x.pages[i], x.pages[i + 1]]; }, true)}, "↓"),
+      h("button", {type: "button", class: "icon", "aria-label": `Delete ${page.title}`, disabled: s.pages.length === 1,
+        onclick: () => change((x) => {
+          x.pages.splice(i, 1);
+          if (x.bell.opens === page.id) x.bell.opens = "drawer";
+        }, true)}, "✕")),
+    h("div", {class: "segmented", role: "radiogroup", "aria-label": "Columns"},
+      ["single", "split"].map((v) => h("label", {}, h("input", {type: "radio", name: `layout-${page.id}`, checked: page.layout === v,
+        onchange: () => change((x) => { x.pages[i].layout = v; }, true)}), v === "single" ? "One column" : "Two columns"))),
+    split ? h("div", {class: "ratio"},
+      h("label", {}, "Left ", h("strong", {}, `${page.ratio}%`), " / right ", h("strong", {}, `${100 - page.ratio}%`),
+        h("input", {type: "range", min: 20, max: 80, step: 5, value: page.ratio,
+          oninput: (e) => { const v = Number(e.target.value); e.target.previousElementSibling.previousElementSibling.textContent = `${v}%`;
+            e.target.previousElementSibling.textContent = `${100 - v}%`; change((x) => { x.pages[i].ratio = v; }); }})),
+      h("label", {class: "chip"}, h("input", {type: "checkbox", checked: page.collapsible,
+        onchange: (e) => change((x) => { x.pages[i].collapsible = e.target.checked; }, true)}), "Left column collapses")) : null,
+    split
+      ? h("div", {class: "cols", style: `grid-template-columns: ${page.ratio}fr ${100 - page.ratio}fr`},
+        columnEditor(i, 0, "Left"), columnEditor(i, 1, "Right"))
+      : columnEditor(i, 0, "Components"));
+}
+
+function quickPage(title, idBase, ids, layout = "single") {
+  const exists = state.pages.some((p) => ids.every((id) => [...p.columns[0], ...p.columns[1]].includes(id)));
+  return h("button", {type: "button", disabled: exists, onclick: () => change((x) => {
+    const id = x.pages.some((p) => p.id === idBase) ? newId(idBase, x.pages.map((p) => p.id)) : idBase;
+    x.pages.push({id, title, layout, ratio: 35, collapsible: true, columns: layout === "split" ? [[ids[0]], ids.slice(1)] : [ids, []]});
+  }, true)}, `+ ${title} page`);
+}
+
+// Pages that only repeat a pane the hub already has.
+function repeats(s) {
+  const panes = {inbox: HUB_PANES.inbox, chats: HUB_PANES.chats, files: ["case-list"]};
+  const dup = s.pages.filter((p) => s.layout.hubPanes.some((pane) => panes[pane].every((id) => [...p.columns[0], ...p.columns[1]].includes(id))));
+  return dup.length ? [h("p", {class: "warn"}, `The hub already has ${dup.map((p) => p.title).join(", ")}: remove ${dup.length === 1 ? "that page" : "those pages"} or the matching hub pane.`)] : [];
 }
 
 function renderForm() {
   const s = state;
   const form = $("form");
   const scroll = scrollY;
+  const headerChoices = [...COMPONENTS.filter((c) => c.header), ...s.custom];
   form.replaceChildren(
-    step(1, "The app", s.app.name,
+    step(1, "Start from", TEMPLATES.find((t) => t.id === s.template)?.name,
+      h("div", {class: "options"}, TEMPLATES.map((t) => h("button", {type: "button", class: "option template" + (t.id === s.template ? " current" : ""),
+        onclick: () => {
+          if (t.id === s.template || confirm(`Replace your choices with "${t.name}"?`)) {
+            const keep = {idp: s.idp, db: s.db, frontend: s.frontend, assistants: s.assistants, style: s.style, deploy: s.deploy};
+            state = {...fromTemplate(t.id), ...keep};
+            history.replaceState(null, "", "#" + encode(state));
+            view.screen = 0;
+            renderForm();
+            renderOutput();
+          }
+        }}, h("strong", {}, t.name), h("span", {class: "desc"}, t.desc)))),
+      h("p", {class: "note"}, "A template only fills the fields below; change anything.")),
+
+    step(2, "The app", s.app.name,
       text("Name", () => s.app.name, (x, v) => { x.app.name = v; }),
       text("What it does", () => s.app.description, (x, v) => { x.app.description = v; }, {multiline: true}),
       h("div", {class: "row"},
-        text("Business object", () => s.app.object, (x, v) => { x.app.object = v; }, {hint: "e.g. order, claim, ticket"}),
-        text("ID prefix", () => s.app.idPrefix, (x, v) => { x.app.idPrefix = v; }, {hint: "IDs look like MR-1001"})),
+        text("Business object", () => s.app.object, (x, v) => { x.app.object = v; }, {hint: "What one agent owns: order, claim, ticket…"}),
+        text("ID prefix", () => s.app.idPrefix, (x, v) => { x.app.idPrefix = v; }, {hint: "REQ gives REQ-1001, REQ-1002…"})),
       text("Roles", () => s.app.roles.join(", "), (x, v) => { x.app.roles = list(v); },
-        {hint: "Comma separated. They must match the roles (groups) in the identity provider."}),
-      h("div", {class: "field"}, h("span", {}, "Who opens a " + (s.app.object || "item")),
-        h("select", {onchange: (e) => change((x) => { x.app.userRole = e.target.value; })},
-          s.app.roles.map((r) => h("option", {value: r, selected: r === s.app.userRole}, r)))),
-      h("div", {class: "field"}, h("span", {}, "Roles that see everything (admin)"),
-        chips(s.app.roles, s.app.adminRoles, (x, v, on) => { x.app.adminRoles = toggleIn(x.app.adminRoles, v, on); })),
+        {hint: "Comma separated; they must match the identity provider's roles or groups."}),
+      h("div", {class: "row"},
+        h("label", {class: "field"}, h("span", {}, "Who opens one"),
+          h("select", {onchange: (e) => change((x) => { x.app.userRole = e.target.value; })},
+            s.app.roles.map((r) => h("option", {value: r, selected: r === s.app.userRole}, r)))),
+        h("div", {class: "field"}, h("span", {}, "Who sees all"),
+          chips(s.app.roles, s.app.adminRoles, (x, v, on) => { x.app.adminRoles = toggleIn(x.app.adminRoles, v, on); }))),
       h("div", {class: "row"},
         text("Ballerina org", () => s.app.org, (x, v) => { x.app.org = v; }),
         text("Package name", () => s.app.pkg, (x, v) => { x.app.pkg = v; })),
       h("div", {class: "field"}, h("span", {}, "Database"),
         radios("db", DATABASES, s.db, (x, v) => { x.db = v; }))),
 
-    step(2, "Services and UI", Object.values(s.services).filter((x) => x.on).length + " services",
-      ...SERVICES.map((service) => {
-        const sel = s.services[service.id];
-        return h("div", {class: "service" + (sel.on ? "" : " off")},
-          h("header", {}, h("label", {}, h("input", {type: "checkbox", checked: sel.on,
-            onchange: (e) => change((x) => { x.services[service.id].on = e.target.checked; }, true)}), service.name),
-          h("a", {href: service.repo, target: "_blank", rel: "noopener"}, service.module)),
-          h("p", {}, service.summary),
-          ...service.components.map((c) => h("div", {class: "component"},
-            h("input", {type: "checkbox", id: `c-${c.tag}`, checked: sel.components.includes(c.tag), disabled: !sel.on,
-              onchange: (e) => change((x) => { x.services[service.id].components = toggleIn(x.services[service.id].components, c.tag, e.target.checked); }, true)}),
-            h("label", {for: `c-${c.tag}`}, c.name, " ", h("code", {}, `<${c.tag}>`)),
-            h("a", {href: docUrl(service, c.tag), target: "_blank", rel: "noopener"}, "docs"),
-            h("span", {class: "desc"}, c.summary))));
-      }),
+    step(3, "Layout", LAYOUTS.find((l) => l.id === s.layout.shell).name,
+      radios("shell", LAYOUTS, s.layout.shell, (x, v) => { x.layout.shell = v; }),
+      s.layout.shell === "sidebar" ? h("label", {class: "chip"}, h("input", {type: "checkbox", checked: s.layout.collapsible,
+        onchange: (e) => change((x) => { x.layout.collapsible = e.target.checked; }, true)}), "The sidebar collapses to a rail") : null,
+      s.layout.shell === "hub" ? h("div", {class: "field"}, h("span", {}, "Hub panes"),
+        chips(["inbox", "chats", "files"], s.layout.hubPanes, (x, v, on) => { x.layout.hubPanes = toggleIn(x.layout.hubPanes, v, on); }),
+        h("small", {}, h("a", {href: DOCS.hub, target: "_blank", rel: "noopener"}, "commons-hub docs"))) : null,
+      s.layout.shell !== "hub" ? h("div", {class: "field"}, h("span", {}, "In the header"),
+        chips(headerChoices.map((c) => c.id), s.header, (x, v, on) => { x.header = toggleIn(x.header, v, on); }),
+        h("small", {}, headerChoices.map((c) => `${c.id}: ${label(c)}`).join(" · "))) : null,
+      s.layout.shell !== "hub" && s.header.includes("bell") ? h("label", {class: "field"}, h("span", {}, "The bell opens"),
+        h("select", {onchange: (e) => change((x) => { x.bell.opens = e.target.value; }, true)},
+          h("option", {value: "drawer", selected: s.bell.opens === "drawer"}, "The inbox in a drawer"),
+          s.pages.map((p) => h("option", {value: p.id, selected: s.bell.opens === p.id}, `The ${p.title} page`)))) : null,
       h("div", {class: "field"}, h("span", {}, "Frontend"),
         h("select", {onchange: (e) => change((x) => { x.frontend.framework = e.target.value; }, true)},
           FRAMEWORKS.map((f) => h("option", {value: f.id, selected: f.id === s.frontend.framework}, f.name))),
-        h("small", {}, FRAMEWORKS.find((f) => f.id === s.frontend.framework).note)),
-      h("div", {class: "field"}, h("span", {}, "Layout"),
-        radios("layout", [
-          {id: "hub", name: "One page", tag: "<commons-hub>", desc: "Notifications, chats and files as panes of one element, plus the app's own panes."},
-          {id: "pages", name: "Separate pages", desc: "A header with the bell, and a page per feature."}
-        ], s.frontend.layout, (x, v) => { x.frontend.layout = v; }),
-        h("small", {}, h("a", {href: DOCS.hub, target: "_blank", rel: "noopener"}, "commons-hub docs"), " · ",
-          h("a", {href: DOCS.guide, target: "_blank", rel: "noopener"}, "components guide")))),
+        h("small", {}, FRAMEWORKS.find((f) => f.id === s.frontend.framework).note))),
 
-    step(3, "Sign-in", IDPS.find((i) => i.id === s.idp.kind).name,
+    step(4, "Pages", `${s.pages.length} page${s.pages.length === 1 ? "" : "s"}`,
+      ...(s.layout.shell === "hub" ? repeats(s) : []),
+      ...s.pages.map((p, i) => pageEditor(p, i)),
+      h("div", {class: "chips"},
+        h("button", {type: "button", onclick: () => change((x) => {
+          x.pages.push({id: newId("page", x.pages.map((p) => p.id)), title: "New page", layout: "single", ratio: 40, collapsible: true, columns: [[], []]});
+        }, true)}, "+ Blank page"),
+        quickPage("Notifications", "inbox", ["inbox"]),
+        quickPage("Chats", "chats", ["conversation-list", "conversation"], "split"),
+        quickPage("Files", "files", ["case-list", "file-viewer"], "split")),
+      h("p", {class: "note"}, "Commons components: ",
+        SERVICES.flatMap((svc) => svc.components.map((c) => [svc, c])).map(([svc, c], i) => [i ? " · " : "",
+          h("a", {href: docUrl(svc, c.tag), target: "_blank", rel: "noopener"}, `<${c.tag}>`)]), ". ",
+        h("a", {href: DOCS.guide, target: "_blank", rel: "noopener"}, "Guide"))),
+
+    step(5, "Custom components", s.custom.length ? `${s.custom.length}` : "none",
+      h("p", {class: "note"}, "Anything the app needs that isn't in the list: describe it, place it on a page, and the prompts ask the assistant to build it."),
+      ...s.custom.map((c, i) => h("div", {class: "service"},
+        h("div", {class: "page-top"},
+          h("input", {type: "text", value: c.name, "aria-label": `Name of custom component ${i + 1}`,
+            oninput: (e) => change((x) => { x.custom[i].name = e.target.value; })}),
+          h("button", {type: "button", class: "icon", "aria-label": `Delete ${c.name}`, onclick: () => change((x) => {
+            x.custom.splice(i, 1);
+            x.header = x.header.filter((id) => id !== c.id);
+            for (const p of x.pages) p.columns = p.columns.map((col) => col.filter((id) => id !== c.id));
+          }, true)}, "✕")),
+        h("textarea", {value: c.description, rows: 2, "aria-label": `What ${c.name} does`, placeholder: "What it shows and does",
+          oninput: (e) => change((x) => { x.custom[i].description = e.target.value; })}),
+        h("label", {class: "chip"}, h("input", {type: "checkbox", checked: c.api,
+          onchange: (e) => change((x) => { x.custom[i].api = e.target.checked; }, true)}), "Needs a backend endpoint"),
+        usedComponents(s).includes(c.id) ? null : h("p", {class: "warn"}, "Not on any page yet: add it from a page's menu."))),
+      h("button", {type: "button", onclick: () => change((x) => {
+        x.custom.push({id: newId("custom", x.custom.map((c) => c.id)), name: "New component", description: "", api: false});
+      }, true)}, "+ Add a custom component")),
+
+    step(6, "Sign-in", IDPS.find((i) => i.id === s.idp.kind).name,
       radios("idp", IDPS.map((i) => ({id: i.id, name: i.name, tag: i.license, desc: i.summary})), s.idp.kind,
         (x, v) => { x.idp = {...x.idp, kind: v, ...IDPS.find((i) => i.id === v).defaults}; }),
       ...(s.idp.kind === "none" ? [h("p", {class: "warn"}, "Development only: anyone can claim any identity.")] : [
@@ -169,9 +300,9 @@ function renderForm() {
           text("Roles claim", () => s.idp.rolesClaim, (x, v) => { x.idp.rolesClaim = v; },
             {hint: "An array or a comma list; dotted paths for nested claims"}))])),
 
-    step(4, "Durable agent", s.agent.on ? s.agent.name : "off",
+    step(7, "Durable agent", s.agent.on ? s.agent.name : "off",
       h("label", {class: "chip"}, h("input", {type: "checkbox", checked: s.agent.on,
-        onchange: (e) => change((x) => { x.agent.on = e.target.checked; }, true)}), "An AI agent owns each " + (s.app.object || "item")),
+        onchange: (e) => change((x) => { x.agent.on = e.target.checked; }, true)}), `An AI agent owns each ${object()}`),
       ...(!s.agent.on ? [] : [
         h("div", {class: "row"},
           text("Agent name", () => s.agent.name, (x, v) => { x.agent.name = v; }, {hint: "Its chat ID is agent:<name>"}),
@@ -180,27 +311,30 @@ function renderForm() {
         text("The process, one step per line", () => s.agent.steps.join("\n"), (x, v) => { x.agent.steps = v.split("\n"); },
           {multiline: true, hint: "Name the tools each step calls; events are MESSAGE, FORM_ANSWER, UPLOAD and REMINDER."}),
         h("div", {class: "field"}, h("span", {}, "Activities (generated code)"),
-          chips(ACTIVITIES.map((a) => a.id), s.agent.activities,
-            (x, v, on) => { x.agent.activities = toggleIn(x.agent.activities, v, on); },
-            (v) => !s.services[ACTIVITIES.find((a) => a.id === v).service].on),
-          h("small", {}, "Each is a durable activity that calls a commons service; greyed-out ones need their service.")),
+          h("div", {class: "options"}, ACTIVITIES.map((a) => h("label", {class: "option"},
+            h("input", {type: "checkbox", checked: s.agent.activities.includes(a.id),
+              onchange: (e) => change((x) => { x.agent.activities = toggleIn(x.agent.activities, a.id, e.target.checked); }, true)}),
+            h("span", {}, a.id, h("span", {class: "tag"}, a.service === "app" ? "app" : SERVICES.find((x) => x.id === a.service).name)),
+            h("span", {class: "desc"}, a.summary.replaceAll("{object}", object()))))),
+          h("small", {}, "An activity turns its service on in the backend even if no page shows it.")),
         h("label", {class: "chip"}, h("input", {type: "checkbox", checked: s.agent.approval.on,
           onchange: (e) => change((x) => { x.agent.approval.on = e.target.checked; }, true)}), "A person approves one activity first"),
         ...(!s.agent.approval.on ? [] : [
-          h("div", {class: "field"}, h("span", {}, "Guarded activity"),
+          h("label", {class: "field"}, h("span", {}, "Guarded activity"),
             h("select", {onchange: (e) => change((x) => { x.agent.approval.activity = e.target.value; })},
               s.agent.activities.map((a) => h("option", {value: a, selected: a === s.agent.approval.activity}, a)))),
           h("div", {class: "field"}, h("span", {}, "Approvers"),
             chips(s.app.roles, s.agent.approval.userRoles, (x, v, on) => { x.agent.approval.userRoles = toggleIn(x.agent.approval.userRoles, v, on); })),
           h("div", {class: "field"}, h("span", {}, "Administrators (can decide any)"),
-            chips(s.app.roles, s.agent.approval.adminRoles, (x, v, on) => { x.agent.approval.adminRoles = toggleIn(x.agent.approval.adminRoles, v, on); }))]),
+            chips(s.app.roles, s.agent.approval.adminRoles, (x, v, on) => { x.agent.approval.adminRoles = toggleIn(x.agent.approval.adminRoles, v, on); })),
+          usedComponents(s).includes("approvals") ? null : h("p", {class: "warn"}, "Add the Approvals component to a page so people can decide.")]),
         h("div", {class: "field"}, h("span", {}, "Model"),
           radios("model", [
             {id: "wso2", name: "WSO2 default model provider", desc: "ai:getDefaultModelProvider(), configured in Config.toml or VS Code."},
             {id: "other", name: "Another ballerinax/ai.* provider", desc: "Any provider with tool calling; the prompt says what to change."}
           ], s.agent.model, (x, v) => { x.agent.model = v; }))])),
 
-    step(5, "Assistants and output", s.style === "steps" ? "step by step" : "one prompt each",
+    step(8, "Assistants and output", s.style === "steps" ? "step by step" : "one prompt each",
       h("p", {class: "note"}, "Frontend: ", h("a", {href: ASSISTANTS.claude.url, target: "_blank", rel: "noopener"}, "Claude Code"), "."),
       h("div", {class: "field"}, h("span", {}, "Backend"),
         radios("backend", [{id: "claude", name: "Claude Code"}, {id: "copilot", name: "Ballerina Copilot", desc: "Prompts carry the API cheat sheet; one change per prompt."}],
@@ -214,8 +348,8 @@ function renderForm() {
           {id: "full", name: "One prompt per part", desc: "Everything at once, for a long unattended run."}
         ], s.style, (x, v) => { x.style = v; })),
       h("div", {class: "field"}, h("span", {}, "Run it with"),
-        radios("deploy", [{id: "compose", name: "Docker Compose", desc: "Adds docker-compose.yml and nginx.conf."},
-          {id: "local", name: "Locally", desc: "bal run, temporal server start-dev, the frontend dev server."}],
+        radios("deploy", [{id: "local", name: "Locally", desc: "bal run, temporal server start-dev, the frontend dev server."},
+          {id: "compose", name: "Docker Compose", desc: "Adds docker-compose.yml and nginx.conf."}],
         s.deploy, (x, v) => { x.deploy = v; }))));
   scrollTo({top: scroll});
 }
@@ -234,7 +368,8 @@ function renderWireframe() {
   $("panel-wireframe").replaceChildren(
     subtabs(all.map((x) => x.name), view.screen, (i) => { view.screen = i; }),
     h("div", {class: "wireframe", html: svg(screen)}),
-    h("div", {class: "legend"}, h("span", {class: "c"}, "bal-commons component"), h("span", {}, "the app's own UI")),
+    h("div", {class: "legend"}, h("span", {class: "c"}, "bal-commons component"), h("span", {}, "the app's own"),
+      h("span", {class: "x"}, "custom")),
     h("p", {class: "note"}, "Layout only. The components bring their own look; theme them with --bc-* custom properties."));
 }
 
@@ -304,7 +439,7 @@ for (const tab of ["wireframe", "prompts", "code"]) {
 }
 $("share").addEventListener("click", () => copy(location.href, "the link"));
 $("reset").addEventListener("click", () => {
-  if (confirm("Start over with the example selection?")) {
+  if (confirm("Start over with the blank demo app?")) {
     state = defaults();
     history.replaceState(null, "", "#" + encode(state));
     renderForm();

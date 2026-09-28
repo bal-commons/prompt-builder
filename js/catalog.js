@@ -74,8 +74,45 @@ export function serviceById(id) {
   return SERVICES.find((s) => s.id === id);
 }
 
-// Activities a durable agent can be given, per service. `code` is generated in code.js.
+// Every component a page can hold. `service` components come from bal-commons; `app` ones the assistant builds for
+// the app's business object; custom ones the user adds (state.custom). `header` ones sit in the header.
+export const COMPONENTS = [
+  {id: "bell", tag: "commons-notification-bell", service: "notification", name: "Notification bell", header: true,
+    summary: "Unread count; opens the inbox in a drawer or on its page."},
+  {id: "inbox", tag: "commons-inbox", service: "notification", name: "Inbox", summary: "Personal and role notifications, filters, mark read."},
+  {id: "conversation-list", tag: "commons-conversation-list", service: "chat", name: "Conversation list", summary: "The user's conversations, unread counts, search."},
+  {id: "conversation", tag: "commons-conversation", service: "chat", name: "Conversation", weight: 2, summary: "Messages, streamed agent replies, forms, upload cards."},
+  {id: "upload-case", tag: "commons-upload-case", service: "attachment", name: "Upload card", summary: "One upload case: drop zones per slot, previews, Submit."},
+  {id: "case-list", tag: "commons-case-list", service: "attachment", name: "Case list", summary: "Upload cases with progress; all cases for admin roles."},
+  {id: "file-viewer", tag: "commons-file-viewer", service: "attachment", name: "File viewer", summary: "A case's files: gallery, preview, download, delete."},
+  {id: "item-form", app: true, name: "New {object} form", summary: "Opens a {object} (and its agent)."},
+  {id: "item-list", app: true, name: "{Object} list", summary: "The user's {object}s (everyone's for admin roles), with status."},
+  {id: "item-detail", app: true, name: "{Object} detail", summary: "One {object}: fields, status, owner, dates."},
+  {id: "approvals", app: true, name: "Approvals", needsApproval: true, summary: "Agent actions waiting for a person: approve, or reject with a reason."},
+  {id: "stats", app: true, name: "Summary cards", summary: "Counts of {object}s by status."},
+  {id: "user-menu", app: true, header: true, name: "User menu", summary: "Who is signed in; sign out (or the persona switcher)."}
+];
+
+export function componentName(component, object) {
+  const cap = object ? object[0].toUpperCase() + object.slice(1) : "Item";
+  return component.name.replace("{object}", object || "item").replace("{Object}", cap);
+}
+
+export function componentSummary(component, object) {
+  return (component.summary ?? component.description ?? "").replaceAll("{object}", object || "item");
+}
+
+export const LAYOUTS = [
+  {id: "sidebar", name: "Sidebar navigation", desc: "Pages in a left sidebar that collapses to a thin rail; header on top."},
+  {id: "top", name: "Top navigation", desc: "Pages as links in the header."},
+  {id: "hub", name: "One <commons-hub>", desc: "The hub's rail with Notifications, Chats and Files panes; your pages become extra panes."}
+];
+
+export const RATIOS = [30, 35, 40, 50, 60, 65, 70];
+
+// Activities a durable agent can be given, per service ("app" ones use the app's own store). `code` is in code.js.
 export const ACTIVITIES = [
+  {id: "updateStatus", service: "app", summary: "Sets the {object}'s status (e.g. APPROVED); a good place for an approval policy."},
   {id: "notifyUser", service: "notification", summary: "Sends one user a notification."},
   {id: "notifyRole", service: "notification", summary: "Sends everyone holding a role a notification."},
   {id: "sendMessage", service: "chat", summary: "Streams a message into the conversation about a business object."},

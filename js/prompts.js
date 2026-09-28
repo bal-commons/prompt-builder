@@ -1,12 +1,11 @@
-import {ASSISTANTS, DOCS, docUrl, FRAMEWORKS, IDPS, SERVICES, VERSIONS} from "./catalog.js";
+import {ASSISTANTS, componentName, componentSummary, DOCS, docUrl, FRAMEWORKS, IDPS, serviceById, SERVICES, VERSIONS} from "./catalog.js";
 import {activeActivities, names} from "./code.js";
-import {enabledServices} from "./state.js";
-import {describePages} from "./wireframe.js";
+import {component, enabledServices, identifier, pageComponents, usedComponents} from "./state.js";
 
 // Builds the prompts. Each part is a list of steps; the "full" style joins them into one prompt.
 export function prompts(state) {
   const parts = [frontend(state), backend(state)];
-  if (state.agent.on && enabledServices(state).length) {
+  if (state.agent.on) {
     parts.push(workflow(state));
   }
   return parts.map((part) => state.style === "full" ? {...part, steps: [join(part)]} : part);
@@ -21,114 +20,122 @@ function join(part) {
 
 const bullet = (items) => items.filter(Boolean).map((i) => `- ${i}`).join("\n");
 const services = (state) => enabledServices(state).map((id) => SERVICES.find((s) => s.id === id));
-const selected = (state) => services(state).flatMap((s) => s.components
-  .filter((c) => state.services[s.id].components.includes(c.tag)).map((c) => ({...c, service: s})));
+const on = (state, id) => enabledServices(state).includes(id);
+const used = (state) => usedComponents(state).map((id) => component(state, id));
+const nameOf = (state, c) => c.tag ? `<${c.tag}>` : c.app ? componentName(c, state.app.object) : c.name;
+const slug = (text) => identifier(text, "custom").replace(/_/g, "-");
+const verb = (list) => list.length === 1 ? "sees" : "see";
+// "a request", "an expense claim".
+const an = (word) => (/^[aeiou]/i.test(word) ? "an " : "a ") + word;
 
 function context(state) {
   const n = names(state);
   const idp = IDPS.find((i) => i.id === state.idp.kind);
+  const list = services(state);
   return `App: ${state.app.name}. ${state.app.description}
-Business object: ${n.object} (IDs like ${n.idPrefix}-1001). Roles: ${state.app.roles.join(", ")}${state.app.adminRoles.length ? `; ${state.app.adminRoles.join(", ")} ${state.app.adminRoles.length === 1 ? "sees" : "see"} everyone's ${n.object}s` : ""}.
-Commons services (Ballerina Central org \`commons\`, version ${VERSIONS.commons}), all running in the backend process:
-${bullet(services(state).map((s) => `${s.name}: \`${s.module}\`, port ${s.port}, base path ${s.basePath}. ${s.summary}`))}
-Sign-in: ${idp.id === "none" ? "none yet (development headers)" : `${idp.name} (OIDC)`}.
-Correlation rule: the ${n.object}'s ID is the \`correlationId\` of every conversation, upload case and notification about it (a second conversation about it uses \`${n.idPrefix}-1001/<party>\`).`;
+Business object: ${n.object} (IDs like ${n.idPrefix}-1001). Roles: ${state.app.roles.join(", ")}${state.app.adminRoles.length ? `; ${state.app.adminRoles.join(", ")} ${verb(state.app.adminRoles)} everyone's ${n.object}s` : ""}.
+${list.length ? `Commons services (Ballerina Central org \`commons\`, version ${VERSIONS.commons}), all running in the backend process:
+${bullet(list.map((s) => `${s.name}: \`${s.module}\`, port ${s.port}, base path ${s.basePath}. ${s.summary}`))}` : "No commons services: the app has only its own API."}
+Sign-in: ${idp.id === "none" ? "none yet (development headers)" : `${idp.name} (OIDC)`}.${list.length ? `
+Correlation rule: the ${n.object}'s ID is the \`correlationId\` of every conversation, upload case and notification about it (a second conversation about it uses \`${n.idPrefix}-1001/<party>\`).` : ""}`;
 }
 
 // ---------------------------------------------------------------- frontend
+
+const PROXY = {notification: "/api/notifications", chat: "/api/chat", attachment: "/api/attachments"};
 
 function frontend(state) {
   const n = names(state);
   const fw = FRAMEWORKS.find((f) => f.id === state.frontend.framework);
   const idp = IDPS.find((i) => i.id === state.idp.kind);
-  const comps = selected(state);
-  const hub = state.frontend.layout === "hub";
-  const approval = state.agent.on && state.agent.approval.on;
-  const packages = [...new Set(comps.map((c) => c.service.npm))];
-  if (hub) packages.push("@bal-commons/hub-ui");
   const plain = fw.id === "plain";
-
+  const shell = state.layout.shell;
+  const hub = shell === "hub";
+  const all = used(state);
+  const commons = all.filter((c) => c.tag);
+  const packages = [...new Set(commons.map((c) => serviceById(c.service).npm))];
+  if (hub) packages.push("@bal-commons/hub-ui");
   const steps = [];
+
   steps.push({
     title: "Project and packages",
     body: `Create the frontend in \`frontend/\` with ${fw.name}. ${fw.note}
 Serve it on port 5173 in development${plain ? " with Vite as a dev server only (`npx vite`, MIT), for its proxy; the app code stays plain ES modules with no build step" : ""}.
-
-The UI comes from the bal-commons Web Components (Lit, Apache-2.0). They are not on npm yet, so build them from source:
+${commons.length ? `
+The notification, chat and upload UI comes from the bal-commons Web Components (Lit, Apache-2.0). They are not on npm yet, so build them from source:
 \`\`\`sh
 git clone https://github.com/bal-commons/module-commons-service-commons && (cd module-commons-service-commons/ui && npm install && npm run build)
-${services(state).map((s) => `git clone ${s.repo} && (cd ${s.repo.split("/").pop()}/ui && npm install && npm run build)`).join("\n")}${hub ? `
+${[...new Set(commons.map((c) => c.service))].map((id) => serviceById(id)).map((s) => `git clone ${s.repo} && (cd ${s.repo.split("/").pop()}/ui && npm install && npm run build)`).join("\n")}${hub ? `
 git clone ${DOCS.hubRepo} && (cd commons-hub-ui && npm install && npm run build)` : ""}
 \`\`\`
 ${plain
   ? `Copy the single-file bundles into \`frontend/public/vendor/\` and load them with \`<script type="module">\`: ${hub ? "`hub-ui.bundle.js` alone (it contains every component)" : packages.map((p) => `\`${p.split("/")[1]}.bundle.js\``).join(", ")}. Once they are published, the same files come from \`https://cdn.jsdelivr.net/npm/<package>@${VERSIONS.ui}/dist/<name>.bundle.js\`.`
   : `Use \`npm link\` in each package's \`ui/\` directory (the hub at its repo root), then \`npm link ${packages.join(" ")}\` in \`frontend/\`. Import each package once at startup (\`import "${packages[0]}";\`) to register its elements. Once they are published, \`npm install ${packages.join(" ")}\` replaces the links.`}
-
-In development, proxy these paths to the backend (the components keep a server-sent events stream open, so the proxy must not buffer):
-${bullet([["/api/app", "http://localhost:9090/app"], ...services(state).map((s) => [`/api/${s.id === "notification" ? "notifications" : s.id === "attachment" ? "attachments" : "chat"}`, `http://localhost:${s.port}${s.basePath}`])].map(([a, b]) => `\`${a}\` → \`${b}\``))}
-Read the cross-cutting guide before you start: ${DOCS.guide}`,
-    check: "the dev server starts, the page loads the component packages without console errors, and the proxy answers `/api/app/" + n.path + "` (401 without a token is fine)."
+Read the components guide before you start: ${DOCS.guide}
+` : ""}
+In development, proxy these paths to the backend${commons.length ? " (the components keep a server-sent events stream open, so the proxy must not buffer)" : ""}:
+${bullet([["/api/app", "http://localhost:9090/app"], ...services(state).map((s) => [PROXY[s.id], `http://localhost:${s.port}${s.basePath}`])].map(([a, b]) => `\`${a}\` → \`${b}\``))}`,
+    check: `the dev server starts${commons.length ? ", the component packages load without console errors" : ""}, and the proxy answers \`/api/app/${n.path}\` (401 without a token is fine).`
   });
 
   steps.push({
     title: "Sign-in",
     body: idp.id === "none"
-      ? `There is no identity provider yet. Add a persona switcher (a select in the header) with one user per role (${state.app.roles.join(", ")}), and call \`configureAuth(devUser(userId, roles))\` from any bal-commons package at startup. Send the same identity to the app API as \`x-user-id\` and \`x-user-roles\` headers. Keep all of this behind one \`auth.ts\` module so it can be swapped for OIDC later.`
+      ? `There is no identity provider yet. Add a persona switcher${state.header.includes("user-menu") ? " in the user menu" : " in the header"} with one user per role (${state.app.roles.join(", ")})${commons.length ? ", and call `configureAuth(devUser(userId, roles))` from any bal-commons package at startup" : ""}. Send the identity to the app API as \`x-user-id\` and \`x-user-roles\` headers. Keep all of this in one \`auth\` module so it can be swapped for OIDC later.`
       : `Sign users in with ${idp.name} using the OIDC authorization code flow with PKCE (a public client: no client secret in the browser).
 ${bullet([
   `Client ID \`${state.idp.clientId}\`, authorize \`${state.idp.authorizeUrl}\`, token \`${state.idp.tokenUrl}\`, scopes \`${state.idp.scopes}\`, redirect URI \`http://localhost:5173/callback\`.`,
   plain ? "Write the PKCE flow by hand (about 60 lines: code verifier, S256 challenge, redirect, code exchange). No library." : "Use `oidc-client-ts` (Apache-2.0) for the flow.",
   `Keep the access token in sessionStorage. Read the user ID from the \`${state.idp.userIdClaim}\` claim and roles from \`${state.idp.rolesClaim}\` (an array or a comma list), only to shape the UI: the services check the token themselves.`,
-  "Call `configureAuth(bearer(() => token, () => signIn()))` once at startup, so every component sends the token and a 401 starts sign-in again. Send the same `Authorization: Bearer` header to the app API.",
-  idp.defaults.selfSigned ? `${idp.name} uses a self-signed certificate in development: proxy the token endpoint through the dev server so the browser doesn't call it cross-origin.` : "",
-  "Show the signed-in user and a Sign out button in the header."
+  commons.length ? "Call `configureAuth(bearer(() => token, () => signIn()))` once at startup, so every component sends the token and a 401 starts sign-in again." : "",
+  "Send the same `Authorization: Bearer` header to the app API.",
+  idp.defaults.selfSigned ? `${idp.name} uses a self-signed certificate in development: proxy the token endpoint through the dev server so the browser doesn't call it cross-origin.` : ""
 ])}`,
-    check: `you can sign in as a user of each role (${state.app.roles.join(", ")}) and the header shows who is signed in.`
+    check: `you can sign in as a user of each role (${state.app.roles.join(", ")}).`
   });
 
-  const pages = describePages(state);
+  steps.push({title: "Layout and navigation", body: layoutText(state),
+    check: "every page is reachable from the navigation, Back works, and the layout holds at 1280px and at 390px wide."});
+
   steps.push({
-    title: hub ? "The page: one <commons-hub>" : "Pages and navigation",
-    body: `${hub
-      ? `The whole app is one \`<commons-hub>\` (${DOCS.hub}) filling the viewport, with \`notifications-url\`, \`chat-url\` and \`attachments-url\` set to the proxy paths, \`me\` set to the signed-in user ID and \`routing="hash"\`. Set \`admin\` for ${state.app.adminRoles.join(", ") || "admin roles"} so the Files pane lists every case. Put the app's name in \`slot="brand"\` and the user menu in \`slot="nav-end"\`. Add the app's own panes as children: \`<section pane="${n.path}" label="${capital(n.path)}">\`${approval ? " and `<section pane=\"reviews\" label=\"Approvals\">`" : ""}.`
-      : `Build these pages with a header on every page (app name, ${state.services.notification?.on && state.services.notification.components.includes("commons-notification-bell") ? "`<commons-notification-bell>` that opens the inbox, " : ""}the user menu):`}
+    title: "The pages",
+    body: `${state.pages.map((p) => pageText(state, p)).join("\n\n")}
 
-${pages.map((p) => `### ${p.name}\n${p.description}`).join("\n\n")}
-
-Wireframes are in the builder's Wireframe tab; follow their layout, not their styling.`,
-    check: "every page renders at 1280px and at 390px wide, and the browser Back button moves between pages."
+The builder's Wireframe tab shows each page; follow its layout, not its styling.`,
+    check: "each page shows its components in the stated columns and ratio, and selecting an item in a list updates the components beside it."
   });
 
-  steps.push({
-    title: "Wire the components",
-    body: `Set each component's service URL once, from one config module. The components keep themselves live; never poll their services.${hub ? `
-\`<commons-hub>\` renders the inbox, conversation list, conversation, case list, upload card and file viewer itself from its three URLs, and its rail badges replace the bell. The notes below apply where the app's own panes embed a component (e.g. the ${n.object} detail's conversation).` : ""}
-${comps.filter((c) => !(hub && c.tag === "commons-notification-bell")).map((c) => `
+  if (commons.length) {
+    steps.push({
+      title: "Wire the commons components",
+      body: `Set each component's service URL once, from one config module. The components keep themselves live; never poll their services.${hub ? `
+\`<commons-hub>\` renders its panes' components itself from its URLs; the notes below apply where your own pages embed a component.` : ""}
+${commons.map((c) => `
 ### <${c.tag}>
 ${COMPONENT_NOTES[c.tag](state)}
-Reference: ${docUrl(c.service, c.tag)}`).join("\n")}${hub ? `
+Reference: ${docUrl(serviceById(c.service), c.tag)}`).join("\n")}${hub ? `
 
 ### <commons-hub>
-It already contains the components above. Listen for \`commons-hub-navigate\` only if the app must veto or log navigation. Reference: ${DOCS.hub}` : ""}`,
-    check: `a notification about ${n.idPrefix}-1001 opens its conversation${state.services.attachment?.on ? ", an upload card accepts a dropped file" : ""}, and unread counts update without a reload.`
-  });
+Reference: ${DOCS.hub}` : ""}`,
+      check: `unread counts and new messages appear without a reload${on(state, "chat") ? `, and a notification about ${n.idPrefix}-1001 opens its conversation` : ""}.`
+    });
+  }
 
-  steps.push({
-    title: `The ${n.object} pages`,
-    body: `The app API (Ballerina, behind \`/api/app\`) has:
-${bullet([
-  `\`POST /api/app/${n.path}\` with \`{title, details}\` opens a ${n.object}${state.services.chat?.on ? ", its conversation with the agent" : ""}${state.agent.on ? " and the durable agent that owns it" : ""}; returns the ${n.object} (\`id\`, \`status\`, \`conversationId\`, \`agentId\`, \`createdAt\`).`,
-  `\`GET /api/app/${n.path}\` lists the caller's own (everyone's for ${state.app.adminRoles.join(", ") || "admin roles"}).`,
-  `\`GET /api/app/${n.path}/{id}\` returns one.`,
-  approval ? "`GET /api/app/reviews` lists the approvals the caller's roles may decide (`taskId`, `title`, `description`, `input`); `POST /api/app/reviews/{taskId}` with `{approved, comment}` decides one. A rejection needs a comment: the agent reads it as the reason." : ""
-])}
-Build: a "New ${n.object}" form for ${state.app.userRole}; a list with status; a detail view that shows the ${n.object}'s conversation (\`conversationId\`)${state.services.attachment?.on ? " and its files (`<commons-case-list correlation-id=\"<id>\">` beside `<commons-file-viewer>`)" : ""}${approval ? "; an Approvals view with Approve and Reject (comment required)" : ""}. After creating a ${n.object}, open its conversation.`,
-    check: `a ${state.app.userRole} can open a ${n.object} and lands in its conversation; ${state.app.adminRoles[0] ?? "an admin"} sees it in the list.`
-  });
+  const own = all.filter((c) => !c.tag);
+  if (own.length) {
+    steps.push({
+      title: "The app's own components",
+      body: `The app API (Ballerina, behind \`/api/app\`):
+${bullet(apiLines(state))}
+
+${own.map((c) => `### ${nameOf(state, c)}\n${APP_NOTES[c.id] ? APP_NOTES[c.id](state) : customNote(state, c)}`).join("\n\n")}`,
+      check: `a ${state.app.userRole} can open ${an(n.object)} and see it update as the agent works; ${state.app.adminRoles[0] ?? "an admin"} sees everyone's.`
+    });
+  }
 
   steps.push({
     title: "Look and feel",
-    body: `Match the app's design through the components' CSS custom properties on \`:root\` (\`--bc-accent\`, \`--bc-font\`, \`--bc-radius\`, \`--bc-bg\`, \`--bc-surface\`, \`--bc-border\`, …) and their \`::part()\`s; don't restyle their internals. Keep dark mode (\`prefers-color-scheme\`). Keep keyboard access (every list item and button is reachable with Tab and Enter). No horizontal scroll at 390px.`,
+    body: `${commons.length ? "Match the app's design through the components' CSS custom properties on `:root` (`--bc-accent`, `--bc-font`, `--bc-radius`, `--bc-bg`, `--bc-surface`, `--bc-border`, …) and their `::part()`s; don't restyle their internals. " : ""}Use one set of design tokens for the app's own components too. Keep dark mode (\`prefers-color-scheme\`) and keyboard access (Tab and Enter reach every control). No horizontal scroll at 390px.`,
     check: "the pages look consistent in light and dark mode, and there are no console errors while you use every page."
   });
 
@@ -140,22 +147,108 @@ Build: a "New ${n.object}" form for ${state.app.userRole}; a list with status; a
 
 ${context(state)}
 
-Use the bal-commons Web Components for notifications, chat and uploads; build only the app's own screens yourself. Keep the code small and readable; no UI framework beyond ${fw.name}${plain ? "" : " and what it needs"}. Use only dependencies whose licenses are compatible with Apache-2.0 (MIT, BSD, Apache), and list them in THIRD_PARTY_NOTICES.md.`,
+${commons.length ? "Use the bal-commons Web Components for notifications, chat and uploads; build only the app's own components yourself. " : ""}Keep the code small and readable; no UI library beyond ${fw.name}${plain ? "" : " and what it needs"}. Use only dependencies whose licenses are compatible with Apache-2.0 (MIT, BSD, Apache), and list them in THIRD_PARTY_NOTICES.md.`,
     steps
   };
 }
 
-const capital = (s) => s[0].toUpperCase() + s.slice(1);
+function headerText(state) {
+  const items = state.header.map((id) => component(state, id)).filter(Boolean);
+  if (!items.length) return "";
+  const bell = state.header.includes("bell");
+  const target = state.pages.find((p) => p.id === state.bell.opens);
+  return `On the right of the header: ${items.map((c) => nameOf(state, c)).join(", ")}.${bell ? ` Clicking the bell ${target
+    ? `goes to the ${target.title} page`
+    : "opens a drawer from the right, about 380px wide, holding `<commons-inbox>`; Escape, a click outside and a notification click close it"}.` : ""}`;
+}
+
+function layoutText(state) {
+  const n = names(state);
+  const titles = state.pages.map((p) => p.title);
+  const routes = state.pages.map((p) => `\`#/${p.id}\``).join(", ");
+  const shell = state.layout.shell;
+  if (shell === "hub") {
+    const panes = state.layout.hubPanes;
+    return `The app is one \`<commons-hub>\` (${DOCS.hub}) filling the viewport, with ${panes.map((p) => `the ${{inbox: "Notifications", chats: "Chats", files: "Files"}[p]}`).join(", ")} pane${panes.length === 1 ? "" : "s"} (set \`panes="${panes.join(" ")}"\` and the URLs of the services they use), \`me\` set to the signed-in user ID and \`routing="hash"\`${state.app.adminRoles.length && panes.includes("files") ? `; set \`admin\` for ${state.app.adminRoles.join(", ")} so Files lists every case` : ""}. Put the app's name in \`slot="brand"\`${state.header.includes("user-menu") ? " and the user menu in `slot=\"nav-end\"`" : ""}.
+The app's own pages are extra panes: ${state.pages.map((p) => `\`<section pane="${p.id}" label="${p.title}">\``).join(", ")}; lay each out as described in the next step. The hub's rail badges replace a separate bell.`;
+  }
+  const nav = shell === "sidebar"
+    ? `A left sidebar (about 220px) lists the pages: ${titles.join(", ")}.${state.layout.collapsible ? " A toggle at its bottom collapses it to a 56px rail of icons with tooltips; remember the choice in localStorage." : ""} A header runs across the content with the current page's title.`
+    : `A header holds the app name and the pages as links: ${titles.join(", ")}.`;
+  return `${nav}
+${headerText(state)}
+Each page has its own route (${routes}); the first is the home page and Back moves between them. Below 720px wide ${shell === "sidebar" ? "the sidebar becomes a drawer behind a menu button, and " : "the links move into a menu, and "}two-column pages stack their columns (the left one first; when an item is selected, show the right one with a Back link).${state.pages.some((p) => pageComponents(p).flat().includes("item-detail")) ? ` Selecting ${an(n.object)} puts its ID in the route (e.g. \`#/${state.pages[0].id}/${n.idPrefix}-1001\`), so a notification link can open it.` : ""}`;
+}
+
+function pageText(state, page) {
+  const n = names(state);
+  const cols = pageComponents(page);
+  const list = (ids) => ids.map((id) => component(state, id)).filter(Boolean).map((c) => nameOf(state, c)).join(", ") || "(empty)";
+  const layout = cols.length === 1
+    ? `One column: ${list(cols[0])}.`
+    : `Two columns, ${page.ratio}% / ${100 - page.ratio}%.${page.collapsible ? " The left column collapses to a 40px strip with a toggle at its top edge (the right column then takes the full width); remember it per page." : ""}
+- Left: ${list(cols[0])}
+- Right: ${list(cols[1])}`;
+  const ids = cols.flat();
+  const has = (id) => ids.includes(id);
+  const rules = [];
+  if (has("item-list") && ["item-detail", "conversation", "case-list", "file-viewer", "upload-case"].some(has)) {
+    rules.push(`Selecting ${an(n.object)} in the list shows it in ${["item-detail", "conversation", "case-list", "file-viewer", "upload-case"].filter(has).map((id) => nameOf(state, component(state, id))).join(" and ")} (the conversation by the ${n.object}'s \`conversationId\`, cases by \`correlation-id\` = its ID). Nothing selected: an empty state that says what to do.`);
+  }
+  if (has("item-form")) {
+    rules.push(`After the form opens ${an(n.object)}, select it${has("conversation") ? " and show its conversation" : ""}.`);
+  }
+  if (has("conversation-list") && has("conversation")) {
+    rules.push("Selecting a conversation in the list shows it in the conversation.");
+  }
+  if (has("case-list") && has("file-viewer") && has("upload-case")) {
+    rules.push("Selecting a case shows it: the upload card while it is OPEN and the user is one of its subjects, otherwise the file viewer.");
+  } else if (has("case-list") && (has("file-viewer") || has("upload-case"))) {
+    rules.push(`Selecting a case shows it in the ${has("file-viewer") ? "file viewer" : "upload card"}.`);
+  }
+  if (has("conversation") && !has("item-list") && !has("conversation-list")) {
+    rules.push(`The conversation shows the ${n.object} named in the route; without one, the user's latest.`);
+  }
+  return `### ${page.title} (\`#/${page.id}\`)
+${layout}${rules.length ? "\n" + bullet(rules) : ""}`;
+}
+
+function apiLines(state) {
+  const n = names(state);
+  const approval = state.agent.on && state.agent.approval.on;
+  return [
+    `\`POST /api/app/${n.path}\` with \`{title, details}\` opens ${an(n.object)}${on(state, "chat") ? ", its conversation with the agent" : ""}${state.agent.on ? " and the durable agent that owns it" : ""}; returns it (\`id\`, \`status\`, \`conversationId\`, \`agentId\`, \`createdAt\`).`,
+    `\`GET /api/app/${n.path}\` lists the caller's own (everyone's for ${state.app.adminRoles.join(", ") || "admin roles"}); \`GET /api/app/${n.path}/{id}\` returns one.`,
+    approval ? "`GET /api/app/reviews` lists the agent actions the caller's roles may approve (`taskId`, `title`, `description`, `input`); `POST /api/app/reviews/{taskId}` with `{approved, comment}` decides one." : "",
+    ...state.custom.filter((c) => c.api && usedComponents(state).includes(c.id)).map((c) => `\`GET /api/app/${slug(c.name)}\` serves ${c.name} (the backend prompt adds it).`)
+  ];
+}
+
+function customNote(state, c) {
+  return `Build it: ${c.description || "(no description yet)"}${c.api ? ` It reads \`/api/app/${slug(c.name)}\`.` : " Frontend only."}`;
+}
+
+const APP_NOTES = {
+  "item-form": (state) => `Title and details (plus the fields this app adds), for ${state.app.userRole}. Posts to \`/api/app/${names(state).path}\`; shows the service's error message on 400.`,
+  "item-list": (state) => `The ${names(state).object}s from \`GET /api/app/${names(state).path}\`, newest first, with ID, title, status and age. Refresh after creating one${on(state, "notification") ? " and when a notification about one arrives" : ""}.`,
+  "item-detail": (state) => `The selected ${names(state).object}: title, status, details, owner and dates, from \`GET /api/app/${names(state).path}/{id}\`.`,
+  "approvals": (state) => state.agent.on && state.agent.approval.on
+    ? `Pending reviews from \`GET /api/app/reviews\`: what the agent wants to do (\`title\`, \`description\`) and its arguments (\`input\`), with Approve and Reject. Reject needs a comment: the agent reads it as the reason.`
+    : "The agent has no approval policy yet (turn one on in the builder's agent step); until then this shows an empty state.",
+  "stats": (state) => `Counts of ${names(state).object}s by status, from the list endpoint.`,
+  "user-menu": (state) => `The signed-in user's name and roles${state.idp.kind === "none" ? ", the persona switcher" : ""}, and Sign out.`
+};
 
 const COMPONENT_NOTES = {
-  "commons-notification-bell": () => "`base-url` = the notifications proxy path. On `commons-bell-click`, open the inbox (a panel or the inbox page).",
-  "commons-inbox": (state) => `\`base-url\` = the notifications proxy path; add \`show-filters\` on a full page. On \`commons-notification-click\`, use \`event.detail.notification.correlationId\` (a ${names(state).object} ID) to open that ${names(state).object}, or \`actionUrl\` when set. The default action marks it read; call \`event.preventDefault()\` only to keep it unread.`,
-  "commons-conversation-list": () => "`base-url` = the chat proxy path, property `me` = the user ID, add `searchable`. On `commons-conversation-select`, show `<commons-conversation>` with `event.detail.conversation.id`.",
-  "commons-conversation": (state) => `\`base-url\` = the chat proxy path, \`conversation-id\`, property \`me\` = the user ID${state.services.attachment?.on ? ", and `attachments-url` = the attachments proxy path so an agent's upload requests render as upload cards inside the chat" : ""}. It renders streamed agent replies, forms (JSON Schema) and typing indicators by itself; give it a fixed height.`,
-  "commons-upload-case": () => "`base-url` = the attachments proxy path, `case-id`, property `me` = the user ID (non-subjects then see it read-only). Users drop files or pick them; images and PDFs preview on click. On `commons-case-submitted`, refresh whatever lists the case.",
-  "commons-case-list": (state) => `\`base-url\` = the attachments proxy path, property \`me\`; set \`admin\` for ${state.app.adminRoles.join(", ") || "admin roles"}. On \`commons-case-select\`, show the case: \`<commons-upload-case>\` while it is OPEN and the user is a subject, otherwise \`<commons-file-viewer>\`.`,
-  "commons-file-viewer": (state) => `\`base-url\` = the attachments proxy path, \`case-id\`, property \`me\`${state.app.adminRoles.length ? `; set \`can-delete\` for ${state.app.adminRoles.join(", ")}` : ""}. It previews, downloads and deletes by itself; listen to \`commons-file-deleted\` only to update other views.`
+  "commons-notification-bell": (state) => `\`base-url\` = \`${PROXY.notification}\`. On \`commons-bell-click\`, ${state.pages.some((p) => p.id === state.bell.opens) ? "navigate to the notifications page" : "open the inbox drawer"}.`,
+  "commons-inbox": (state) => `\`base-url\` = \`${PROXY.notification}\`; add \`show-filters\` on a full page. On \`commons-notification-click\`, use \`event.detail.notification.correlationId\` (${an(names(state).object)} ID) to open that ${names(state).object}, or \`actionUrl\` when set. The default action marks it read.`,
+  "commons-conversation-list": () => `\`base-url\` = \`${PROXY.chat}\`, property \`me\` = the user ID, add \`searchable\`. On \`commons-conversation-select\`, show \`event.detail.conversation.id\` in the conversation.`,
+  "commons-conversation": (state) => `\`base-url\` = \`${PROXY.chat}\`, \`conversation-id\`, property \`me\` = the user ID${on(state, "attachment") ? `, and \`attachments-url\` = \`${PROXY.attachment}\` so the agent's upload requests render as upload cards inside the chat` : ""}. It renders streamed agent replies, forms and typing indicators itself; give it a fixed height.`,
+  "commons-upload-case": () => `\`base-url\` = \`${PROXY.attachment}\`, \`case-id\`, property \`me\` = the user ID (others see it read-only). On \`commons-case-submitted\`, refresh what lists the case.`,
+  "commons-case-list": (state) => `\`base-url\` = \`${PROXY.attachment}\`, property \`me\`${state.app.adminRoles.length ? `; set \`admin\` for ${state.app.adminRoles.join(", ")}` : ""}. On \`commons-case-select\`, show \`event.detail.case\`.`,
+  "commons-file-viewer": (state) => `\`base-url\` = \`${PROXY.attachment}\`, \`case-id\`, property \`me\`${state.app.adminRoles.length ? `; set \`can-delete\` for ${state.app.adminRoles.join(", ")}` : ""}. It previews, downloads and deletes by itself.`
 };
+
 
 // ---------------------------------------------------------------- backend
 
@@ -202,6 +295,17 @@ Create users for each role (${state.app.roles.join(", ")}) and check a token has
     check: `\`POST /app/${n.path}\` with the new fields returns 201 and \`GET\` returns them.`
   });
 
+  const customApis = state.custom.filter((c) => c.api && usedComponents(state).includes(c.id));
+  if (customApis.length) {
+    steps.push({
+      title: "Endpoints for custom components",
+      body: `Add a resource to the \`/app\` service in app.bal for each custom component, scoped to the caller like the others:
+${bullet(customApis.map((c) => `\`GET /app/${slug(c.name)}\` for ${c.name}: ${c.description || "(describe what it returns)"}`))}
+Put their data in the app's store (a new migration) or call the system that owns it; keep secrets in Config.toml.`,
+      check: `each endpoint answers with the caller's token and returns 401 without it.`
+    });
+  }
+
   steps.push({
     title: "Database",
     body: state.db === "h2"
@@ -234,13 +338,13 @@ ${cheatSheet(state)}` : ""}`,
 
 function cheatSheet(state) {
   const lines = [];
-  if (state.services.notification?.on) {
+  if (on(state, "notification")) {
     lines.push("notification:Client `notifications`: `send(NewNotification)` with recipientType USER|ROLE, recipientId, severity INFO|WARNING|ERROR|SUCCESS, title, body, correlationId, actionUrl, idempotencyKey; `list`, `unreadCount`, `markRead`.");
   }
-  if (state.services.chat?.on) {
+  if (on(state, "chat")) {
     lines.push("chat:Client `chats`: `createConversation({correlationId, title, participants: [{participantId}, {participantType: chat:AGENT, participantId, displayName}]})`, `findByCorrelation(correlationId)`, `sendText(conversationId, text, senderId, id)`, `sendMessage(conversationId, {kind: chat:FORM|chat:ATTACHMENT_REF|chat:TEXT, content, senderId, id})`, `startStreaming`/`appendChunk`/`completeMessage`, `typing`, `history(conversationId, afterSeq = n)`, `close(conversationId, reason, senderId)`.");
   }
-  if (state.services.attachment?.on) {
+  if (on(state, "attachment")) {
     lines.push("attachment:Client `attachments`: `createCase({idempotencyKey, correlationId, title, subjects, watchers, slots: [{name, label, mimeTypes, minFiles, maxFiles}], autoSubmit})`, `getCase`, `listCases`, `listFiles`, `download`, `close(caseId, reason)`, `reopen`.");
   }
   lines.push("commons/service_commons.webhook: `verify(req, secret)` returns `WebhookEvent {eventId, event, correlationId?, data}` or an error.");
@@ -266,9 +370,9 @@ ${bullet([
   state.agent.model === "wso2"
     ? "The model: the WSO2 default provider, `[ballerina.ai.wso2ProviderConfig]` with `serviceUrl` and `accessToken` in Config.toml (VS Code: Ballerina → Configure default model provider). Tokens expire; keep them out of source control."
     : "The model: replace `ai:getDefaultModelProvider()` with the ballerinax/ai.* provider you use; it must support tool calling. Test that it calls tools, not just replies.",
-  `Webhooks: Config.toml registers the agent (\`${n.agentId}\`) with the ${[state.services.chat?.on && "chat", state.services.attachment?.on && "attachment"].filter(Boolean).join(" and ")} service${state.services.chat?.on && state.services.attachment?.on ? "s" : ""}: \`url\` is this app's \`/hooks/...\` receiver (the services run in the same process, so \`localhost:9090\` is right; change it only if you move a service out), \`secret\` must equal \`webhookSecret\`, and \`events\` lists what to deliver. The services sign each delivery; hooks.bal verifies it, drops repeats (at-least-once delivery) and hands the event to the agent with \`sendData(agentId, "chat", event)\`.`
+  `Webhooks: Config.toml registers the agent (\`${n.agentId}\`) with the ${[on(state, "chat") && "chat", on(state, "attachment") && "attachment"].filter(Boolean).join(" and ")} service${on(state, "chat") && on(state, "attachment") ? "s" : ""}: \`url\` is this app's \`/hooks/...\` receiver (the services run in the same process, so \`localhost:9090\` is right; change it only if you move a service out), \`secret\` must equal \`webhookSecret\`, and \`events\` lists what to deliver. The services sign each delivery; hooks.bal verifies it, drops repeats (at-least-once delivery) and hands the event to the agent with \`sendData(agentId, "chat", event)\`.`
 ])}`,
-    check: `opening a ${n.object} starts an agent (its ID is on the ${n.object}) and the agent's first message appears in the conversation.`
+    check: `opening ${an(n.object)} starts an agent (its ID is on the ${n.object}) and the agent's first message appears in the conversation.`
   });
 
   steps.push({
@@ -277,7 +381,7 @@ ${bullet([
 Current steps:
 ${state.agent.steps.filter(Boolean).map((s, i) => `${i + 1}. ${s}`).join("\n") || "(none yet)"}
 Give each activity a description that says when to use it and what comes back; the model chooses tools from those descriptions.`,
-    check: `a scripted run (open a ${n.object}, answer as the user, upload a file) makes the agent follow every step, and each turn ends without errors in the log.`
+    check: `a scripted run (open ${an(n.object)}, answer as the user, upload a file) makes the agent follow every step, and each turn ends without errors in the log.`
   });
 
   steps.push({

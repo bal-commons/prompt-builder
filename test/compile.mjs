@@ -1,25 +1,31 @@
-// Generates backends for several selections and compiles each with `bal build`.
+// Generates backends for every template and a few edge cases, and compiles each with `bal build`.
 // Usage: node test/compile.mjs <work dir>
 import {execFileSync} from "node:child_process";
 import {mkdirSync, rmSync, writeFileSync} from "node:fs";
 import {dirname, join} from "node:path";
 import {files} from "../js/code.js";
-import {defaults} from "../js/state.js";
+import {fromTemplate} from "../js/state.js";
+import {TEMPLATES} from "../js/templates.js";
 
 const work = process.argv[2] ?? "/tmp/prompt-builder-compile";
-const variants = {
-  full: (s) => s,
-  approval: (s) => { s.agent.approval = {on: true, activity: "closeCase", userRoles: ["PropertyManager", "Owner"], adminRoles: ["Admin"]}; return s; },
-  noAgent: (s) => { s.agent.on = false; return s; },
-  chatOnly: (s) => { s.services.notification.on = false; s.services.attachment.on = false; return s; },
-  attachmentOnly: (s) => { s.services.notification.on = false; s.services.chat.on = false; s.db = "postgresql"; s.idp.kind = "none"; return s; },
-  notificationOnly: (s) => { s.services.chat.on = false; s.services.attachment.on = false; s.db = "mysql"; return s; }
-};
+const variants = Object.fromEntries(TEMPLATES.map((t) => [t.id, () => fromTemplate(t.id)]));
+Object.assign(variants, {
+  // No commons service at all: only the app API and an agent with updateStatus.
+  appOnly: () => {
+    const s = fromTemplate("blank");
+    s.header = ["user-menu"];
+    s.pages = [{id: "home", title: "Home", layout: "single", ratio: 50, collapsible: false, columns: [["item-form", "item-list"], []]}];
+    s.agent.activities = ["updateStatus"];
+    return s;
+  },
+  noAgent: () => { const s = fromTemplate("approval"); s.agent.on = false; s.db = "postgresql"; return s; },
+  keycloakMysql: () => { const s = fromTemplate("support"); s.idp.kind = "keycloak"; s.db = "mysql"; s.deploy = "compose"; return s; }
+});
 let failed = 0;
-for (const [name, change] of Object.entries(variants)) {
+for (const [name, make] of Object.entries(variants)) {
   const dir = join(work, name);
   rmSync(dir, {recursive: true, force: true});
-  for (const [path, content] of files(change(defaults()))) {
+  for (const [path, content] of files(make())) {
     if (!path.startsWith("backend/")) continue;
     const target = join(dir, path.slice("backend/".length));
     mkdirSync(dirname(target), {recursive: true});
