@@ -1,5 +1,4 @@
-import {componentName} from "./catalog.js";
-import {names} from "./code.js";
+import {inputSchema} from "./prompts.js";
 import {component, HUB_PANES, pageComponents} from "./state.js";
 
 // Wireframes of the app's screens as SVG boxes: layout only, the components bring their own look.
@@ -9,20 +8,23 @@ const H = 480;
 
 // What a component's box says inside, line by line.
 function sketch(state, id) {
-  const n = names(state);
+  const c = component(state, id);
+  if (c?.start) {
+    const wf = state.workflows.find((w) => w.id === c.start);
+    const fields = Object.entries(inputSchema(wf.input).properties).map(([, p]) => `${p.title}: [          ]`);
+    return [...fields.slice(0, 3), `[ ${wf.kind === "agent" ? "Start" : "Submit"} ]`];
+  }
   const lines = {
     "bell": ["🔔 ②"],
-    "inbox": ["All | Personal | Roles   ☐ Unread  severity ▾", "● WARNING  Needs attention …", "● INFO     New " + n.object + " …", "  SUCCESS  Done …"],
+    "inbox": ["All | Personal | Roles   ☐ Unread  severity ▾", "● WARNING  Needs attention …", "● INFO     Run started …", "  SUCCESS  Done …"],
     "conversation-list": ["[ search ]", "title · 2 unread", "title", "title"],
     "conversation": ["agent: streamed reply …", "              you: …", "form: [field] [field] Send", "[ message …        ] Send"],
     "upload-case": ["Files 1/3 · image/*   [▢][▢]", "┆ Drop files here or choose ┆", "[ Submit ]"],
     "case-list": ["title · Needs your upload", "▓▓▓▓░░ 2/3 slots", "title · submitted"],
     "file-viewer": ["[img] [img] [PDF]", "Download · Delete"],
-    "item-form": ["[ title ]", "[ details … ]", "[ Open ]"],
-    "item-list": [`${n.idPrefix}-1002 · title · OPEN`, `${n.idPrefix}-1001 · title · DONE`, "…"],
-    "item-detail": ["title · status", "fields · owner · dates"],
-    "approvals": ["action · arguments", "[ comment ]  Approve  Reject"],
-    "stats": ["[ 12 open ]  [ 4 waiting ]  [ 31 done ]"],
+    "runs": [`${(state.app.idPrefix || "RUN").toUpperCase()}-1002 · title · RUNNING`, `${(state.app.idPrefix || "RUN").toUpperCase()}-1001 · title · DONE`, "…"],
+    "task-inbox": ["Review the request     Task", "Approve payOut    Approval", "…"],
+    "task-form": ["Title · pending", "About: fields of the run", "[generated form fields]", "[ Complete ]  Can't do this"],
     "user-menu": ["user ▾"]
   }[id];
   return lines ?? [component(state, id)?.description ?? ""];
@@ -31,7 +33,7 @@ function sketch(state, id) {
 function label(state, id) {
   const c = component(state, id);
   if (!c) return id;
-  return c.tag ? `<${c.tag}>` : c.app ? componentName(c, state.app.object) : c.name;
+  return c.start ? `<${c.tag}> ${c.name}` : c.tag ? `<${c.tag}>` : c.name;
 }
 
 function kind(state, id) {
@@ -127,9 +129,11 @@ export function svg(screen) {
     const fill = {nav: "var(--wf-nav)", component: "var(--wf-component)", app: "var(--wf-panel)", custom: "var(--wf-custom)",
       empty: "none", toggle: "var(--wf-nav)", dim: "var(--wf-dim)"}[r.kind];
     const max = Math.max(0, Math.floor((r.h - 30) / 18));
-    const lines = r.lines.slice(0, max).map((line, i) => `<text x="${r.x + 10}" y="${r.y + 38 + i * 18}" class="wf-line">${esc(line)}</text>`).join("");
+    // Monospace text: about 7px per character at 12px, 6.6px at 11px.
+    const fit = (text, px) => { const n = Math.max(1, Math.floor((r.w - 20) / px)); return text.length > n ? text.slice(0, n - 1) + "…" : text; };
+    const lines = r.lines.slice(0, max).map((line, i) => `<text x="${r.x + 10}" y="${r.y + 38 + i * 18}" class="wf-line">${esc(fit(line, 6.6))}</text>`).join("");
     return `<g><rect x="${r.x + 1}" y="${r.y + 1}" width="${r.w - 2}" height="${r.h - 2}" rx="6" fill="${fill}" class="wf-box ${r.kind}"/>
-      <text x="${r.x + (r.kind === "toggle" ? 5 : 10)}" y="${r.y + (r.kind === "toggle" ? 14 : 20)}" class="wf-label">${esc(r.label)}</text>${lines}</g>`;
+      <text x="${r.x + (r.kind === "toggle" ? 5 : 10)}" y="${r.y + (r.kind === "toggle" ? 14 : 20)}" class="wf-label">${esc(r.kind === "toggle" ? r.label : fit(r.label, 7.3))}</text>${lines}</g>`;
   }).join("");
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Wireframe: ${esc(screen.name)}" xmlns="http://www.w3.org/2000/svg">
     <rect width="${W}" height="${H}" fill="var(--wf-bg)"/>${parts}</svg>`;

@@ -66,12 +66,22 @@ export const SERVICES = [
   }
 ];
 
+// The workflow UI talks to the workflow app's own management API, not a commons service.
+export const WORKFLOW_UI = {
+  id: "workflow",
+  name: "Workflow tasks",
+  npm: "@bal-commons/workflow-ui",
+  repo: `${GH}/commons-workflow-ui`,
+  docs: (tag) => `${GH}/commons-workflow-ui/blob/main/docs/${tag}.md`
+};
+
 export function docUrl(service, tag) {
+  if (service?.id === "workflow") return WORKFLOW_UI.docs(tag);
   return `${service.repo}/blob/main/ui/docs/${tag}.md`;
 }
 
 export function serviceById(id) {
-  return SERVICES.find((s) => s.id === id);
+  return id === "workflow" ? WORKFLOW_UI : SERVICES.find((s) => s.id === id);
 }
 
 // Every component a page can hold. `service` components come from bal-commons; `app` ones the assistant builds for
@@ -85,21 +95,14 @@ export const COMPONENTS = [
   {id: "upload-case", tag: "commons-upload-case", service: "attachment", name: "Upload card", summary: "One upload case: drop zones per slot, previews, Submit."},
   {id: "case-list", tag: "commons-case-list", service: "attachment", name: "Case list", summary: "Upload cases with progress; all cases for admin roles."},
   {id: "file-viewer", tag: "commons-file-viewer", service: "attachment", name: "File viewer", summary: "A case's files: gallery, preview, download, delete."},
-  {id: "item-form", app: true, name: "New {object} form", summary: "Opens a {object} (and its agent)."},
-  {id: "item-list", app: true, name: "{Object} list", summary: "The user's {object}s (everyone's for admin roles), with status."},
-  {id: "item-detail", app: true, name: "{Object} detail", summary: "One {object}: fields, status, owner, dates."},
-  {id: "approvals", app: true, name: "Approvals", needsApproval: true, summary: "Agent actions waiting for a person: approve, or reject with a reason."},
-  {id: "stats", app: true, name: "Summary cards", summary: "Counts of {object}s by status."},
+  {id: "task-inbox", tag: "workflow-task-inbox", service: "workflow", name: "Task inbox", summary: "The user's human tasks and approvals from the workflows."},
+  {id: "task-form", tag: "workflow-task-form", service: "workflow", name: "Task form", weight: 2, summary: "One task: a form generated from its schema, or Approve / Reject."},
+  {id: "runs", app: true, name: "My runs", summary: "The workflows and agents the user started, with status."},
   {id: "user-menu", app: true, header: true, name: "User menu", summary: "Who is signed in; sign out (or the persona switcher)."}
 ];
 
-export function componentName(component, object) {
-  const cap = object ? object[0].toUpperCase() + object.slice(1) : "Item";
-  return component.name.replace("{object}", object || "item").replace("{Object}", cap);
-}
-
-export function componentSummary(component, object) {
-  return (component.summary ?? component.description ?? "").replaceAll("{object}", object || "item");
+export function componentSummary(component) {
+  return component.summary ?? component.description ?? "";
 }
 
 export const LAYOUTS = [
@@ -112,7 +115,7 @@ export const RATIOS = [30, 35, 40, 50, 60, 65, 70];
 
 // Activities a durable agent can be given, per service ("app" ones use the app's own store). `code` is in code.js.
 export const ACTIVITIES = [
-  {id: "updateStatus", service: "app", summary: "Sets the {object}'s status (e.g. APPROVED); a good place for an approval policy."},
+  {id: "updateStatus", service: "app", summary: "Sets the run's status (e.g. APPROVED); a good place for an approval policy."},
   {id: "notifyUser", service: "notification", summary: "Sends one user a notification."},
   {id: "notifyRole", service: "notification", summary: "Sends everyone holding a role a notification."},
   {id: "sendMessage", service: "chat", summary: "Streams a message into the conversation about a business object."},

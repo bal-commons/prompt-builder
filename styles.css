@@ -182,3 +182,15 @@ button:disabled { opacity: .4; cursor: default; }
 .col-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-edit select { font-size: 12px; padding: 3px 4px; }
 @media (max-width: 480px) { .cols { grid-template-columns: 1fr !important; } }
+
+.wf { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px; display: grid;
+  gap: 10px; background: var(--bg); }
+.wf.workflow { border-left-color: var(--warn); }
+.wf .kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px; }
+.fields { display: grid; gap: 6px; }
+.field-row { display: grid; grid-template-columns: minmax(0, 1fr) 120px 28px 28px; gap: 6px; align-items: center; }
+.field-row.head span { font-size: 11px; color: var(--muted); }
+.field-row .options { grid-column: 1 / -1; }
+.task-edit { border: 1px dashed var(--line); border-radius: 6px; padding: 8px; display: grid; gap: 8px; background: var(--panel); }
+button.link { border: none; background: none; color: var(--accent); padding: 2px 0; justify-self: start; }
