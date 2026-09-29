@@ -1404,6 +1404,10 @@ var Gt = class extends X {
 				type: String,
 				attribute: "instance-id"
 			},
+			taskName: {
+				type: String,
+				attribute: "task-name"
+			},
 			selected: {
 				type: String,
 				reflect: !0
@@ -1459,7 +1463,8 @@ var Gt = class extends X {
 			"kinds",
 			"status",
 			"all",
-			"instanceId"
+			"instanceId",
+			"taskName"
 		].some((t) => e.has(t) && e.get(t) !== void 0) && this.reload();
 	}
 	schedule() {
@@ -1470,6 +1475,7 @@ var Gt = class extends X {
 			let e = new $(this.baseUrl, this.auth), t = this.kinds.split(/[\s,]+/), n = {
 				status: this.status || void 0,
 				parentWorkflowId: this.instanceId || void 0,
+				taskName: this.taskName || void 0,
 				limit: 100
 			}, [r, i] = await Promise.all([t.includes("human") ? e.listHumanTasks(n) : { items: [] }, t.includes("review") ? e.listReviews(n) : { items: [] }]);
 			this.items = [...r.items, ...i.items].filter((e) => this.all || Wt(e)).sort((e, t) => t.startTime.localeCompare(e.startTime)), this.error = void 0, this.loaded = !0;
@@ -1734,6 +1740,10 @@ var Jt = (e) => (...t) => ({
 	static {
 		this.properties = {
 			action: { type: String },
+			workflowType: {
+				type: String,
+				attribute: "workflow-type"
+			},
 			schema: { attribute: !1 },
 			heading: { type: String },
 			submitLabel: {
@@ -1776,7 +1786,10 @@ var Jt = (e) => (...t) => ({
 		try {
 			let t = new URL(this.action, globalThis.location?.href), n = await k(t.origin, t.pathname + t.search, {
 				method: "POST",
-				body: e,
+				body: this.workflowType ? {
+					workflowType: this.workflowType,
+					input: e
+				} : e,
 				auth: this.auth
 			});
 			this.started = n ?? {}, this.generation++, this.dispatchEvent(new CustomEvent("workflow-started", {

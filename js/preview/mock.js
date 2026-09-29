@@ -1,12 +1,15 @@
 import {fieldName, sampleValue, startInputSchema, taskFormSchema, validateAnswer} from "../contracts.js";
 import {wfNames} from "../code.js";
+import {integrationsOf, qualifiedTaskName} from "../state.js";
 
 // The mock adapter: an in-memory implementation of the routes, payloads and events the bal-commons components and
 // the generated start service use. It answers only URLs under MOCK_ORIGIN; everything else goes to the network.
 //
-// Routes (each follows the real service's contract; see the component clients and the generated code):
-//   app          GET /app/runs, GET /app/runs/{id}, POST /start/{name}
-//   workflow     GET /human-tasks, GET /human-tasks/{id}, POST /human-tasks/{id}/complete|fail,
+// Each integration has its own origin path (/int/<id>/app-service and /int/<id>/workflow); the commons services are
+// shared. Routes (each follows the real service's contract; see the component clients and the generated code):
+//   app          GET /app/runs, GET /app/runs/{id}, POST /start/{name}          (new integrations)
+//   workflow     POST /workflows {workflowType, input}, GET /definitions,
+//                GET /human-tasks (status, parentWorkflowId, taskName), GET /human-tasks/{id}, POST /human-tasks/{id}/complete|fail,
 //                GET /review-activities, GET /review-activities/{id}, POST /review-activities/{id}/proceed|proceed-with-input|reject,
 //                GET /runtime, GET /human-tasks/pending-count
 //   chat         GET /conversations, GET /conversations/{id}, GET|POST /conversations/{id}/messages,
@@ -19,23 +22,27 @@ import {wfNames} from "../code.js";
 
 export const MOCK_ORIGIN = "https://mock.preview";
 export const MOCK_URLS = {
-  app: `${MOCK_ORIGIN}/app-service`,
-  workflow: `${MOCK_ORIGIN}/workflow`,
   chat: `${MOCK_ORIGIN}/chat/v1`,
   attachment: `${MOCK_ORIGIN}/attachments/v1`,
   notification: `${MOCK_ORIGIN}/notifications/v1`
 };
 
-const NAMES = ["Alex", "Sam", "Priya", "Jordan", "Mei", "Tom", "Ana", "Kofi"];
+// An integration's mock bases: its app API (new ones only) and its workflow management API.
+export const mockIntegration = (intId) => ({app: `${MOCK_ORIGIN}/int/${intId}/app-service`, workflow: `${MOCK_ORIGIN}/int/${intId}/workflow`});
+
 const now = () => new Date().toISOString();
 const later = (ms) => new Promise((r) => setTimeout(r, ms));
 let counter = 0;
 const uid = (prefix) => `${prefix}-${Date.now().toString(36)}${(counter++).toString(36)}`;
 
-// One persona per role, named so the preview reads naturally.
+// The people the preview signs in as: the identity step's initial users.
 export function personasOf(config) {
-  return config.app.roles.map((role, i) => ({id: NAMES[i % NAMES.length].toLowerCase(), name: NAMES[i % NAMES.length], roles: [role]}));
+  const users = config.identity.users.filter((u) => u.username);
+  return (users.length ? users : [{username: "user", name: "User", roles: config.identity.roles.slice(0, 1)}])
+    .map((u) => ({id: u.username, name: u.name || u.username, roles: u.roles}));
 }
+
+const typeOf = (wf) => wf.fixedName ?? wfNames(wf).fn;
 
 const ok = (body, status = 200) => ({status, body});
 const fail = (status, message, shape = "commons") => ({status, body: shape === "workflow" ? {error: {message}} : {code: `HTTP_${status}`, message}});
@@ -54,13 +61,13 @@ export class MockBackend {
   configure(config) {
     this.config = config;
     const known = new Set(this.db.seeded);
-    for (const wf of config.workflows) {
-      if (!known.has(wf.id)) this.seedWorkflow(wf);
+    for (const int of integrationsOf(config)) {
+      for (const wf of int.workflows) if (!known.has(`${int.id}:${wf.id}`)) this.seedWorkflow(int, wf);
     }
     this.seedNotifications();
     for (const t of this.db.tasks.filter((x) => x.status === "PENDING")) {
-      const wf = config.workflows.find((w) => wfNames(w).fn === t.parentWorkflowType);
-      const def = wf?.tasks?.find((d) => (d.name || "") === t.taskName.split(".").pop() || d.key === t.taskName);
+      const wf = this.workflowOf(t.intId, t.parentWorkflowType);
+      const def = wf?.tasks?.find((d) => qualifiedTaskName(wf, d) === t.taskName);
       if (def) {
         t.formSchema = JSON.stringify(taskFormSchema(def.fields));
         t.title = `${def.title || def.name} · ${t.runId}`;
@@ -74,11 +81,19 @@ export class MockBackend {
     return personasOf(this.config).find((p) => p.id === id);
   }
 
+  workflowOf(intId, type) {
+    return integrationsOf(this.config).find((i) => i.id === intId)?.workflows.find((w) => typeOf(w) === type);
+  }
+
+  isAdmin(roles) {
+    return roles.some((r) => this.config.identity.adminRoles.includes(r));
+  }
+
   // ------------------------------------------------------------ seed data
 
   seed(config) {
     this.db = {runs: [], conversations: [], messages: [], notifications: [], cases: [], files: [], tasks: [], seeded: []};
-    for (const wf of config.workflows) this.seedWorkflow(wf);
+    for (const int of integrationsOf(config)) for (const wf of int.workflows) this.seedWorkflow(int, wf);
     this.seedNotifications();
     return this.db;
   }
@@ -95,13 +110,11 @@ export class MockBackend {
     if (pending) this.notify("ROLE", pending.userRoles[0], pending.title, "A task is waiting for you in the task inbox (sample).", pending.runId, "WARNING");
   }
 
-  seedWorkflow(wf) {
-    const config = this.config;
-    const people = personasOf(config);
-    const owner = people[0];
-    this.db.seeded.push(wf.id);
+  seedWorkflow(int, wf) {
+    const owner = personasOf(this.config)[0];
+    this.db.seeded.push(`${int.id}:${wf.id}`);
     const values = Object.fromEntries(wf.input.map((f, i) => [fieldName(f), sampleValue(f, i)]));
-    const run = this.createRun(wf, owner.id, values, true);
+    const run = this.createRun(int, wf, owner.id, values, true);
     if (wf.kind === "agent" && wf.chat && run.conversationId) {
       this.post(run.conversationId, owner.id, "TEXT", "Can you give me an update?");
       this.post(run.conversationId, wfNames(wf).agentId, "TEXT", "Sure: I'm working on it and will message you here when it's done. (Sample conversation.)");
@@ -111,10 +124,10 @@ export class MockBackend {
     }
   }
 
-  createRun(wf, ownerId, values, sample = false) {
+  createRun(int, wf, ownerId, values, sample = false) {
     const w = wfNames(wf);
-    const id = `${(this.config.app.idPrefix || "RUN").toUpperCase()}-${1001 + this.db.runs.length}`;
-    const run = {id, workflow: w.fn, ownerId, title: String(values.title ?? values[Object.keys(values)[0]] ?? w.display), status: "RUNNING",
+    const id = `${(int.idPrefix || "RUN").toUpperCase()}-${1001 + this.db.runs.length}`;
+    const run = {id, intId: int.id, workflow: typeOf(wf), ownerId, title: String(values.title ?? values[Object.keys(values)[0]] ?? w.display), status: "RUNNING",
       conversationId: null, instanceId: uid("wf"), createdAt: now(), sample};
     this.db.runs.unshift(run);
     if (wf.kind === "agent" && wf.chat) {
@@ -160,14 +173,14 @@ export class MockBackend {
       if (this.config.capabilities.notifications && events.runFinished) this.notify("USER", run.ownerId, `${run.id} is done`, run.title, run.id, "SUCCESS");
       return;
     }
-    const key = def.name || `task${index + 1}`;
-    const task = {kind: "HUMAN_TASK", taskId: uid("task"), taskName: `${wfNames(wf).fn}.${key}`, title: `${def.title || def.name} · ${run.id}`,
-      description: def.description ?? "", parentWorkflowId: run.instanceId, parentWorkflowType: wfNames(wf).fn, stepId: `${key}#1`,
+    const name = qualifiedTaskName(wf, def);
+    const task = {kind: "HUMAN_TASK", taskId: uid("task"), taskName: name, title: `${def.title || def.name} · ${run.id}`,
+      description: def.description ?? "", parentWorkflowId: run.instanceId, parentWorkflowType: typeOf(wf), stepId: `${name.split(".").pop()}#1`,
       status: "PENDING", startTime: now(), closeTime: null, userRoles: def.roles, users: [], excludedUsers: [], excludedRoles: [],
       administratorRoles: [], administratorUsers: [], completedBy: null, completedAt: null, completedAs: null, canComplete: true,
       canAdminister: false, createdAt: now(), formSchema: JSON.stringify(taskFormSchema(def.fields)),
       taskInput: Object.fromEntries(Object.entries(values).filter(([k]) => !def.context || def.context.includes(k))), result: null,
-      runId: run.id, index};
+      runId: run.id, intId: run.intId, index};
     this.db.tasks.unshift(task);
     run.status = "WAITING";
     const events = this.config.behavior?.notifications?.events ?? {};
@@ -184,7 +197,7 @@ export class MockBackend {
       users: [], excludedUsers: [], excludedRoles: [], administratorRoles: wf.approval.adminRoles ?? [], administratorUsers: [],
       completedBy: null, completedAt: null, completedAs: null, canComplete: false, canAdminister: false, createdAt: now(),
       activityName: `${w.fn}.${wf.approval.activity}`, trigger: "PRE_RUN", errorMessage: "", taskInput: args, decision: null,
-      formSchema: null, runId: run.id};
+      formSchema: null, runId: run.id, intId: run.intId};
   }
 
   // ------------------------------------------------------------ helpers
@@ -252,14 +265,16 @@ export class MockBackend {
     if (this.latency) await later(this.latency);
     if (this.failNext) {
       this.failNext = false;
-      return fail(503, "The preview simulated a service failure. Try again.", url.startsWith(MOCK_URLS.workflow) ? "workflow" : "commons");
+      return fail(503, "The preview simulated a service failure. Try again.", /\/int\/[^/]+\/workflow/.test(url) ? "workflow" : "commons");
     }
     const user = headers["x-user-id"] ?? "";
     const roles = (headers["x-user-roles"] ?? "").split(",").map((r) => r.trim()).filter(Boolean);
     const u = new URL(url);
-    const service = Object.entries(MOCK_URLS).find(([, base]) => url.startsWith(base))?.[0];
-    if (!service) return fail(404, `No mock service at ${url}`);
-    const path = u.pathname.slice(new URL(MOCK_URLS[service]).pathname.length) || "/";
+    const scoped = /^\/int\/([^/]+)\/(app-service|workflow)(\/.*)?$/.exec(u.pathname);
+    const service = scoped ? (scoped[2] === "workflow" ? "workflow" : "app") : Object.entries(MOCK_URLS).find(([, base]) => url.startsWith(base))?.[0];
+    const int = scoped && integrationsOf(this.config).find((i) => i.id === scoped[1]);
+    if (!service || (scoped && !int)) return fail(404, `No mock service at ${url}`);
+    const path = scoped ? scoped[3] ?? "/" : u.pathname.slice(new URL(MOCK_URLS[service]).pathname.length) || "/";
     const q = Object.fromEntries(u.searchParams);
     if (method === "POST" && path === "/stream-ticket") {
       const ticket = uid("tkt");
@@ -267,15 +282,16 @@ export class MockBackend {
       return ok({ticket});
     }
     const route = {app: this.app, workflow: this.workflow, chat: this.chat, attachment: this.attachment, notification: this.notifications}[service];
-    const result = await route.call(this, method, path.split("/").filter(Boolean).map(decodeURIComponent), q, body, user, roles);
+    const result = await route.call(this, method, path.split("/").filter(Boolean).map(decodeURIComponent), q, body, user, roles, int);
     this.save?.();
     return result;
   }
 
-  app(method, parts, q, body, user, roles) {
-    const admin = roles.some((r) => this.config.app.adminRoles.includes(r));
+  app(method, parts, q, body, user, roles, int) {
+    if (int.source !== "new") return fail(404, `${int.title} is an existing integration: it has no generated app API`);
+    const admin = this.isAdmin(roles);
     if (method === "GET" && parts[0] === "app" && parts[1] === "runs") {
-      const mine = this.db.runs.filter((r) => admin || r.ownerId === user);
+      const mine = this.db.runs.filter((r) => r.intId === int.id && (admin || r.ownerId === user));
       if (parts[2]) {
         const run = mine.find((r) => r.id === parts[2]);
         return run ? ok(run) : fail(404, `Run ${parts[2]} not found`);
@@ -283,16 +299,19 @@ export class MockBackend {
       return ok(mine);
     }
     if (method === "POST" && parts[0] === "start" && parts[1]) {
-      const wf = this.config.workflows.find((w) => wfNames(w).path === parts[1]);
+      const wf = int.workflows.find((w) => wfNames(w).path === parts[1]);
       if (!wf) return fail(404, `No start service /start/${parts[1]}`);
-      const schema = startInputSchema(wf.input);
-      const missing = schema.required.filter((k) => body?.[k] === undefined || body?.[k] === null || body?.[k] === "");
+      const missing = this.missing(wf, body);
       if (missing.length) return fail(400, `Missing required field: ${missing.join(", ")}`);
-      const run = this.createRun(wf, user, body ?? {});
+      const run = this.createRun(int, wf, user, body ?? {});
       if (wf.kind === "agent" && run.conversationId) void this.agentTurn(wf, run, {kind: "START", text: String(Object.values(body ?? {})[0] ?? "")});
       return ok({runId: run.id, instanceId: run.instanceId, conversationId: run.conversationId}, 201);
     }
     return fail(404, "Not a route of the generated app");
+  }
+
+  missing(wf, body) {
+    return startInputSchema(wf.input).required.filter((k) => body?.[k] === undefined || body?.[k] === null || body?.[k] === "");
   }
 
   // The simulated agent: a short scripted turn, streamed like a real one.
@@ -332,31 +351,43 @@ export class MockBackend {
     if (event.kind === "UPLOAD") run.status = "SUBMITTED";
   }
 
-  workflow(method, parts, q, body, user, roles) {
-    if (method === "GET" && parts[0] === "runtime") return ok({taskQueue: "PREVIEW"});
+  workflow(method, parts, q, body, user, roles, int) {
+    if (method === "GET" && parts[0] === "runtime") return ok({taskQueue: `PREVIEW-${int.pkg}`});
+    if (method === "GET" && parts[0] === "definitions") {
+      return ok(int.workflows.map((w) => ({workflowType: typeOf(w), kind: w.kind === "agent" ? "AGENT" : "WORKFLOW", inputSchema: startInputSchema(w.input)})));
+    }
+    // Starting through the management API: how the portal starts an existing integration's workflows.
+    if (method === "POST" && parts[0] === "workflows" && !parts[1]) {
+      const wf = int.workflows.find((w) => typeOf(w) === body?.workflowType);
+      if (!wf) return fail(404, `No workflow type ${body?.workflowType ?? "(none)"} in ${int.title}`, "workflow");
+      const missing = this.missing(wf, body?.input);
+      if (missing.length) return fail(400, `Invalid input: missing ${missing.join(", ")}`, "workflow");
+      const run = this.createRun(int, wf, user, body.input ?? {});
+      return ok({workflowId: run.instanceId, runId: uid("temporal-run")}, 201);
+    }
     const kind = parts[0] === "human-tasks" ? "HUMAN_TASK" : parts[0] === "review-activities" ? "REVIEW_ACTIVITY" : null;
     if (!kind) return fail(404, "Not a management API route", "workflow");
     if (method === "GET" && parts[1] === "pending-count") {
-      return ok({count: this.db.tasks.filter((t) => t.kind === kind && t.status === "PENDING" && this.visible(user, roles, t)).length});
+      return ok({count: this.db.tasks.filter((t) => t.intId === int.id && t.kind === kind && t.status === "PENDING" && this.visible(user, roles, t)).length});
     }
     if (method === "GET" && !parts[1]) {
-      const items = this.db.tasks.filter((t) => t.kind === kind && this.visible(user, roles, t) && (!q.status || t.status === q.status)
-        && (!q.parentWorkflowId || t.parentWorkflowId === q.parentWorkflowId));
-      return ok({items: items.map(({formSchema, taskInput, result, decision, errorMessage, createdAt, runId, index, ...summary}) => summary),
+      const items = this.db.tasks.filter((t) => t.intId === int.id && t.kind === kind && this.visible(user, roles, t) && (!q.status || t.status === q.status)
+        && (!q.parentWorkflowId || t.parentWorkflowId === q.parentWorkflowId) && (!q.taskName || t.taskName === q.taskName));
+      return ok({items: items.map(({formSchema, taskInput, result, decision, errorMessage, createdAt, runId, intId, index, ...summary}) => summary),
         nextPageToken: null, hasMore: false});
     }
-    const task = this.db.tasks.find((t) => t.taskId === parts[1] && t.kind === kind);
+    const task = this.db.tasks.find((t) => t.taskId === parts[1] && t.kind === kind && t.intId === int.id);
     if (!task) return fail(404, `Task ${parts[1]} not found`, "workflow");
     if (!this.visible(user, roles, task)) return fail(403, "Unauthorized: caller is not allowed to access this task", "workflow");
     if (method === "GET" && parts.length === 2) {
-      const {runId, index, ...info} = task;
+      const {runId, intId, index, ...info} = task;
       return ok(info);
     }
     if (task.status !== "PENDING") {
       return fail(409, `The task was already ${task.status.toLowerCase()} by ${task.completedBy ?? "someone else"}`, "workflow");
     }
     const run = this.db.runs.find((r) => r.id === task.runId);
-    const wf = this.config.workflows.find((w) => wfNames(w).fn === task.parentWorkflowType);
+    const wf = this.workflowOf(int.id, task.parentWorkflowType);
     const close = (status, as = "audience") => Object.assign(task, {status, completedBy: user, completedAt: now(), completedAs: as, closeTime: now()});
     if (kind === "HUMAN_TASK" && parts[2] === "complete") {
       const problem = validateAnswer(JSON.parse(task.formSchema), body?.result);
@@ -406,7 +437,7 @@ export class MockBackend {
       const kind = body?.kind ?? "TEXT";
       const m = this.post(conv.id, user, kind, body?.content, {replyTo: body?.replyTo});
       const run = this.db.runs.find((r) => r.conversationId === conv.id);
-      const wf = run && this.config.workflows.find((w) => wfNames(w).fn === run.workflow);
+      const wf = run && this.workflowOf(run.intId, run.workflow);
       if (kind === "FORM_RESPONSE" && body.replyTo) {
         const form = this.db.messages.find((x) => x.id === body.replyTo);
         if (form) {
@@ -427,7 +458,7 @@ export class MockBackend {
   }
 
   attachment(method, parts, q, body, user, roles) {
-    const admin = roles.some((r) => this.config.app.adminRoles.includes(r));
+    const admin = this.isAdmin(roles);
     if (method === "GET" && (parts[0] === "cases" || (parts[0] === "admin" && parts[1] === "cases")) && parts.length === (parts[0] === "admin" ? 2 : 1)) {
       if (parts[0] === "admin" && !admin) return fail(403, "Requires an admin role with 'read'");
       const items = this.db.cases.filter((c) => (parts[0] === "admin" || c.subjects.includes(user))
@@ -438,7 +469,7 @@ export class MockBackend {
     const c = this.db.cases.find((x) => x.id === parts[1]);
     if (!c || !(c.subjects.includes(user) || c.createdBy === user || admin)) return fail(404, `Case ${parts[1]} not found`);
     if (method === "GET" && parts.length === 2) return ok(this.caseView(c));
-    const targets = [...c.subjects, c.createdBy, ...this.config.app.adminRoles.map((r) => `role:${r}`)];
+    const targets = [...c.subjects, c.createdBy, ...this.config.identity.adminRoles.map((r) => `role:${r}`)];
     if (method === "POST" && parts[2] === "slots" && parts[4] === "files") {
       if (!c.subjects.includes(user)) return fail(403, "Only the case's subjects upload");
       if (c.status !== "OPEN") return fail(409, "The case is not open");
@@ -481,7 +512,7 @@ export class MockBackend {
       const submitted = this.caseView(c);
       this.emit("attachment", "case.submitted", submitted, targets);
       const run = this.db.runs.find((r) => r.id === c.correlationId);
-      const wf = run && this.config.workflows.find((w) => wfNames(w).fn === run.workflow);
+      const wf = run && this.workflowOf(run.intId, run.workflow);
       if (wf) void this.agentTurn(wf, run, {kind: "UPLOAD", count: submitted.files.length});
       return ok(submitted);
     }

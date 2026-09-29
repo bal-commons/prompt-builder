@@ -3,13 +3,13 @@ import {defaults} from "./state.js";
 import {$, h} from "./ui/dom.js";
 import {copy, renderOutput, starter, TABS} from "./ui/output.js";
 import {reviewStep} from "./ui/review.js";
-import {behaviorStep, capabilitiesStep, describeStep, portalStep, servicesStep, STEPS} from "./ui/steps.js";
+import {architectureStep, behaviorStep, capabilitiesStep, describeStep, identityStep, portalStep, STEPS} from "./ui/steps.js";
 import {boot, change, onChange, openHash, restoreDraft, setView, store, undo} from "./ui/store.js";
 
 // The builder's shell: the step bar, the current step (or every step in Advanced mode), the banner, the toast and
 // the output panel. The steps and outputs live in js/ui/.
 
-const BODIES = {1: describeStep, 2: capabilitiesStep, 3: behaviorStep, 4: portalStep, 5: servicesStep, 6: reviewStep};
+const BODIES = {1: describeStep, 2: identityStep, 3: architectureStep, 4: capabilitiesStep, 5: behaviorStep, 6: portalStep, 7: reviewStep};
 
 function renderSteps() {
   const issues = diagnostics(store.state);
@@ -140,7 +140,7 @@ $("share").addEventListener("click", () => copy(location.href, "the share link")
 $("download").addEventListener("click", () => {
   const blockers = diagnostics(store.state).filter((i) => i.level === "blocker");
   if (blockers.length) {
-    setView({step: 6, mode: "guided", pane: "configure", lastChange: {message: `Fix ${blockers.length} issue${blockers.length > 1 ? "s" : ""} before downloading; the review lists them.`, canUndo: false, at: Date.now()}}, "view");
+    setView({step: STEPS.length, mode: "guided", pane: "configure", lastChange: {message: `Fix ${blockers.length} issue${blockers.length > 1 ? "s" : ""} before downloading; the review lists them.`, canUndo: false, at: Date.now()}}, "view");
     return;
   }
   starter();

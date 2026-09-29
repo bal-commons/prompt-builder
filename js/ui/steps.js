@@ -1,23 +1,30 @@
 import {ACTIVITIES, ASSISTANTS, CAPABILITIES, COMPONENTS, CONNECTIONS, componentSummary, DATABASES, DOCS, docUrl, FRAMEWORKS,
   IDPS, LAYOUTS, SCENARIOS, SERVICES} from "../catalog.js";
 import {wfNames} from "../code.js";
-import {applyScenario, compose, diagnostics, setCapability} from "../compose.js";
+import {applyScenario, compose, diagnostics, setCapability, syncTaskPages} from "../compose.js";
 import {fieldName} from "../contracts.js";
-import {component, enabledServices, newId, newWorkflow, usedComponents, usesManagementApi} from "../state.js";
+import {importDescriptor} from "../descriptor.js";
+import {architectureSvg} from "../diagram.js";
+import {claimMap, devPassword, seedFile} from "../identity.js";
+import {component, enabledServices, integrationOf, integrationsOf, managedIntegrations, newId, newIntegration, newWorkflow, taskTypes,
+  workflowsOf} from "../state.js";
 import {advanced, checkbox, chips, h, list, radios, section, select, text, toggleIn} from "./dom.js";
 import {change, setView, store} from "./store.js";
 
 export const STEPS = [
-  {n: 1, title: "Describe your demo", short: "Describe"},
-  {n: 2, title: "Choose capabilities", short: "Capabilities"},
-  {n: 3, title: "Configure behavior", short: "Behavior"},
-  {n: 4, title: "Arrange your portal", short: "Portal"},
-  {n: 5, title: "Connect services", short: "Services"},
-  {n: 6, title: "Review and generate", short: "Review"}
+  {n: 1, title: "Describe your app", short: "Describe"},
+  {n: 2, title: "Identity and sign-in", short: "Identity"},
+  {n: 3, title: "Design the architecture", short: "Architecture"},
+  {n: 4, title: "Choose capabilities", short: "Capabilities"},
+  {n: 5, title: "Configure behavior", short: "Behavior"},
+  {n: 6, title: "Arrange your portal", short: "Portal"},
+  {n: 7, title: "Review and generate", short: "Review"}
 ];
 
 const s = () => store.state;
 const issuesFor = (n) => diagnostics(s()).filter((i) => i.step === n);
+const wfAt = (x, id) => workflowsOf(x).find((w) => w.id === id);
+const intAt = (x, id) => integrationsOf(x).find((i) => i.id === id);
 
 function issueList(n) {
   const issues = issuesFor(n);
@@ -31,33 +38,395 @@ function issueList(n) {
 
 export function describeStep() {
   const st = s();
-  const blank = !st.workflows.length && !Object.values(st.capabilities).some(Boolean);
+  const blank = !workflowsOf(st).length && !Object.values(st.capabilities).some(Boolean);
   return [
-    section("Start from a scenario", "A scenario picks capabilities and fills in examples you can change later.",
-      h("div", {class: "cards", role: "radiogroup", "aria-label": "Scenario"}, SCENARIOS.map((sc) => h("button", {
+    section("Start from a template", "A template picks capabilities and fills in an integration you can change later. Custom starts empty.",
+      h("div", {class: "cards", role: "radiogroup", "aria-label": "Template"}, SCENARIOS.map((sc) => h("button", {
         type: "button", class: "card-option" + (st.scenario === sc.id ? " current" : ""), role: "radio", "aria-checked": String(st.scenario === sc.id),
         onclick: () => {
           if (st.scenario === sc.id && !blank) return;
           change(() => applyScenario(st, sc.id), {structural: true, undo: `start from ${sc.name}`,
             message: `Started from ${sc.name}: ${sc.capabilities.length ? sc.capabilities.map((c) => CAPABILITIES.find((x) => x.id === c).name).join(", ") : "no capabilities yet"}.`});
         }}, h("strong", {}, sc.name), h("span", {class: "desc"}, sc.desc))))),
-    section("Your demo", null,
-      text("Name", () => st.app.name, (x, v) => { x.app.name = v; }, {required: true, error: st.app.name.trim() ? undefined : "Give the demo a name."}),
+    section("Your app", null,
+      text("Name", () => st.app.name, (x, v) => { x.app.name = v; }, {required: true, error: st.app.name.trim() ? undefined : "Give the app a name."}),
       text("Purpose", () => st.app.description, (x, v) => { x.app.description = v; }, {multiline: true, optional: true,
-        hint: "One or two sentences; the prompts use them to explain the app."}),
-      text("User roles", () => st.app.roles.join(", "), (x, v) => { x.app.roles = list(v); x.app.adminRoles = x.app.adminRoles.filter((r) => x.app.roles.includes(r)); },
-        {hint: "Comma separated, e.g. Employee, Reviewer. Each becomes a preview persona.", error: st.app.roles.length ? undefined : "Add at least one role."}),
-      chips("Who sees everyone's runs (admins)", st.app.roles, st.app.adminRoles, (x, v, on) => { x.app.adminRoles = toggleIn(x.app.adminRoles, v, on); })),
+        hint: "One or two sentences; the prompts use them to explain the app."})),
+    h("p", {class: "small"}, "Next: who signs in (Identity), then what runs behind the portal (Architecture): the integrations, their workflows, agents and human tasks."),
     issueList(1)
   ];
 }
 
-// ---------------------------------------------------------------- 2. capabilities
+// ---------------------------------------------------------------- 2. identity
+
+function usersTable() {
+  const st = s();
+  const id = st.identity;
+  const at = (x, i) => x.identity.users[i];
+  return h("div", {class: "users", role: "group", "aria-label": "Initial users"},
+    id.users.length ? h("div", {class: "user-row head", "aria-hidden": "true"}, h("span", {}, "Username"), h("span", {}, "Name"), h("span", {}, "Email"), h("span")) : null,
+    ...id.users.map((u, i) => h("div", {class: "user-row"},
+      h("input", {type: "text", value: u.username, "aria-label": `User ${i + 1} username`, "aria-invalid": u.username.trim() ? undefined : "true",
+        oninput: (e) => change((x) => { at(x, i).username = e.target.value.trim(); })}),
+      h("input", {type: "text", value: u.name, "aria-label": `User ${i + 1} name`, oninput: (e) => change((x) => { at(x, i).name = e.target.value; })}),
+      h("input", {type: "email", value: u.email, "aria-label": `User ${i + 1} email`, oninput: (e) => change((x) => { at(x, i).email = e.target.value; })}),
+      chips(null, id.roles, u.roles, (x, v, on) => { at(x, i).roles = toggleIn(at(x, i).roles, v, on); }),
+      h("button", {type: "button", class: "icon", "aria-label": `Remove user ${u.username || i + 1}`,
+        onclick: () => change((x) => { x.identity.users.splice(i, 1); }, {structural: true, undo: `remove the user ${u.username}`})}, "✕"))),
+    h("button", {type: "button", class: "link", onclick: () => change((x) => {
+      const n = x.identity.users.length + 1;
+      x.identity.users.push({username: `user${n}`, name: `User ${n}`, email: `user${n}@example.com`, roles: x.identity.roles.slice(0, 1)});
+    }, {structural: true})}, "+ Add a user"));
+}
+
+// The roles the integrations' human tasks and approvals ask for, so the identity step can say which are missing.
+function referencedRoles(st) {
+  const roles = new Set();
+  for (const wf of workflowsOf(st)) {
+    for (const t of wf.tasks ?? []) t.roles.forEach((r) => roles.add(r));
+    if (wf.approval?.on) wf.approval.userRoles.forEach((r) => roles.add(r));
+  }
+  return [...roles];
+}
+
+export function identityStep() {
+  const st = s();
+  const id = st.identity;
+  const idp = IDPS.find((i) => i.id === id.idp.kind);
+  const seed = seedFile(st);
+  const missing = referencedRoles(st).filter((r) => !id.roles.includes(r));
+  return [
+    section("Identity provider", "Who signs users in. Every backend (the integrations, their management APIs, the commons services) trusts the same tokens.",
+      radios("idp", IDPS.map((i) => ({id: i.id, name: i.name, tag: i.license, desc: i.summary})), id.idp.kind,
+        (x, v) => { x.identity.idp = {...x.identity.idp, kind: v, ...IDPS.find((i) => i.id === v).defaults}; }),
+      idp.id === "none" ? h("p", {class: "small"}, "Development only: the backends trust x-user-id / x-user-roles headers, and the login screen lists the users below.") : advanced(`${idp.name} endpoints and client`,
+        h("div", {class: "row"},
+          text("Issuer", () => id.idp.issuer, (x, v) => { x.identity.idp.issuer = v; }),
+          text("JWKS URL", () => id.idp.jwksUrl, (x, v) => { x.identity.idp.jwksUrl = v; })),
+        h("div", {class: "row"},
+          text("Authorize URL", () => id.idp.authorizeUrl, (x, v) => { x.identity.idp.authorizeUrl = v; }),
+          text("Token URL", () => id.idp.tokenUrl, (x, v) => { x.identity.idp.tokenUrl = v; })),
+        h("div", {class: "row"},
+          text("Client ID", () => id.idp.clientId, (x, v) => { x.identity.idp.clientId = v; }, {hint: "A public client with PKCE; the seed file creates it."}),
+          text("Scopes", () => id.idp.scopes, (x, v) => { x.identity.idp.scopes = v; })))),
+    section("Login screen", "The first screen of the portal.",
+      h("div", {class: "row"},
+        text("Title", () => id.login.title, (x, v) => { x.identity.login.title = v; }, {optional: true, placeholder: st.app.name, hint: "Empty uses the app's name."}),
+        text("Subtitle", () => id.login.subtitle, (x, v) => { x.identity.login.subtitle = v; }, {optional: true}))),
+    section("Roles", "What people can do. Human tasks and approvals are assigned to roles; the management API matches them against the token's roles claim.",
+      text("Roles", () => id.roles.join(", "), (x, v) => {
+        x.identity.roles = list(v);
+        x.identity.adminRoles = x.identity.adminRoles.filter((r) => x.identity.roles.includes(r));
+      }, {hint: "Comma separated, e.g. Employee, Reviewer.", error: id.roles.length ? undefined : "Add at least one role."}),
+      chips("Admins (see everyone's runs and files)", id.roles, id.adminRoles, (x, v, on) => { x.identity.adminRoles = toggleIn(x.identity.adminRoles, v, on); }),
+      missing.length ? h("p", {class: "warning-note"}, `The integrations assign tasks to roles that aren't defined here: ${missing.join(", ")}. `,
+        h("button", {type: "button", class: "link", onclick: () => change((x) => { x.identity.roles = [...x.identity.roles, ...missing]; }, {structural: true, message: `Added ${missing.join(", ")}.`})}, "Add them")) : null),
+    section("Initial users", `They sign in to the portal and the preview.${seed ? ` The starter's ${seed[0]} creates them with development passwords (e.g. ${devPassword(id.users[0] ?? {username: "alex"})}).` : ""}`,
+      usersTable()),
+    section("Claims", `Where each backend reads the user and their roles in the access token.${idp.id === "none" ? " They apply once you choose an identity provider." : ""}`,
+      h("div", {class: "row"},
+        text("User ID claim", () => id.idp.userIdClaim, (x, v) => { x.identity.idp.userIdClaim = v; }),
+        text("Roles claim", () => id.idp.rolesClaim, (x, v) => { x.identity.idp.rolesClaim = v; }, {hint: "An array or a comma list; dotted paths for nested claims."})),
+      text("Token audience (aud)", () => id.idp.audience, (x, v) => { x.identity.idp.audience = v; }, {optional: true,
+        hint: "The workflow management APIs check it; empty uses the client ID."}),
+      h("table", {class: "claims"}, h("tbody", {}, claimMap(st).map((c) => h("tr", {}, h("th", {}, c.backend), h("td", {}, h("code", {}, c.settings))))))),
+    issueList(2)
+  ];
+}
+
+// ---------------------------------------------------------------- 3. architecture
+
+const FIELD_TYPES = [["string", "Text"], ["text", "Long text"], ["number", "Number"], ["integer", "Whole number"],
+  ["boolean", "Yes / no"], ["date", "Date"], ["choice", "Choice"]];
+
+// A list of form fields: a start input, or a task's answer or context. Imported fields keep their names.
+function fieldsEditor(get, set, what, {emptyHint} = {}) {
+  const fields = get(s());
+  const update = (i, patch, structural = false) => change((x) => { const next = [...get(x)]; next[i] = {...next[i], ...patch}; set(x, next); }, {structural});
+  const names = fields.map(fieldName);
+  return h("div", {class: "fields", role: "group", "aria-label": `${what} fields`},
+    fields.length ? h("div", {class: "field-row head", "aria-hidden": "true"}, h("span", {}, "Label"), h("span", {}, "Type"), h("span", {}, "Required"), h("span")) : null,
+    ...fields.map((f, i) => {
+      const labelError = !String(f.label || f.name || "").trim() ? "Needs a label" : names.indexOf(names[i]) !== i ? "Two fields share this name" : "";
+      const optionsError = f.type === "choice" && !(f.options ?? []).filter(Boolean).length ? "List the options" : "";
+      return h("div", {class: "field-row"},
+        h("input", {type: "text", value: f.label, "aria-label": `${what} field ${i + 1} label`, placeholder: "Label", "aria-invalid": labelError ? "true" : undefined,
+          title: labelError || (f.imported ? `Field ${f.name} (from the descriptor)` : undefined),
+          oninput: (e) => update(i, f.imported ? {label: e.target.value} : {label: e.target.value, name: e.target.value})}),
+        h("select", {"aria-label": `${what} field ${i + 1} type`, disabled: f.imported, onchange: (e) => update(i, {type: e.target.value}, true)},
+          FIELD_TYPES.map(([v, t]) => h("option", {value: v, selected: f.type === v}, t))),
+        h("input", {type: "checkbox", checked: f.required, disabled: f.imported, "aria-label": `${what} field ${i + 1} required`, onchange: (e) => update(i, {required: e.target.checked})}),
+        f.imported ? h("span", {class: "tag", title: f.lossy ? "The descriptor types it loosely; it's kept as text." : "From the descriptor"}, f.lossy ? "loose" : "imported")
+          : h("button", {type: "button", class: "icon", "aria-label": `Remove ${what} field ${f.label || i + 1}`,
+            onclick: () => change((x) => set(x, get(x).filter((_, j) => j !== i)), {structural: true, undo: `remove the field "${f.label || i + 1}"`})}, "✕"),
+        f.type === "choice" && !f.imported ? h("input", {type: "text", class: "options", value: (f.options ?? []).join(", "), placeholder: "Options, comma separated",
+          "aria-label": `${what} field ${i + 1} options`, "aria-invalid": optionsError ? "true" : undefined,
+          oninput: (e) => update(i, {options: list(e.target.value)})}) : null,
+        labelError || optionsError ? h("small", {class: "error field-error"}, labelError || optionsError) : null);
+    }),
+    !fields.length && emptyHint ? h("small", {}, emptyHint) : null,
+    fields.some((f) => f.imported) ? null : h("button", {type: "button", class: "link", onclick: () => change((x) => set(x, [...get(x), {name: "", label: "", type: "string", required: false}]), {structural: true})},
+      "+ Add a field"));
+}
+
+function removeWorkflow(x, wf) {
+  const int = integrationOf(x, wf.id);
+  int.workflows = int.workflows.filter((w) => w.id !== wf.id);
+  const refs = new Set(taskTypes(x).map((t) => t.ref));
+  x.behavior.tasks.typePages = x.behavior.tasks.typePages.filter((r) => refs.has(r));
+  for (const p of x.pages) p.columns = p.columns.map((col) => col.filter((id) => id !== `start:${wf.id}` && (!id.startsWith("task-inbox@") || refs.has(id.slice(11)))));
+  return syncTaskPages(x);
+}
+
+function agentEditor(wf) {
+  const at = (x) => wfAt(x, wf.id);
+  const st = s();
+  const existing = wf.imported;
+  return h("div", {class: "wf agent"},
+    h("div", {class: "wf-head"}, h("span", {class: "kind"}, "Agent"), h("strong", {}, wf.title || wf.name), existing ? h("span", {class: "tag"}, wf.fixedName) : null),
+    h("div", {class: "row"},
+      text("Name", () => wf.title, (x, v) => { at(x).title = v; }),
+      existing ? null : text("Name in chats", () => wf.displayName, (x, v) => { at(x).displayName = v; }, {hint: "Shown beside its messages."})),
+    text("What it does", () => wf.purpose, (x, v) => { at(x).purpose = v; }, {multiline: true, optional: existing, hint: existing ? "For the prompts; the code is in the integration." : "Its job, in a sentence; this becomes its role."}),
+    wf.chat ? text("Greeting", () => wf.greeting, (x, v) => { at(x).greeting = v; }, {optional: true,
+      hint: "Posted in the chat as soon as a user starts it, before the agent's first turn."}) : null,
+    h("div", {class: "field"}, h("span", {class: "label"}, "Start form"),
+      h("small", {}, existing ? "Its input, from the descriptor." : "What a user fills in to start it. The same fields become its input record."),
+      fieldsEditor((x) => at(x).input, (x, v) => { at(x).input = v; }, `${wf.title} start`, {emptyHint: "No fields: the start form is just a button."})),
+    existing ? null : advanced("Advanced: process, activities and approval",
+      text("Code name", () => wf.name, (x, v) => { at(x).name = v; }, {hint: `Chat identity agent:${wf.name || "name"}; start service /start/${wf.name || "name"}.`}),
+      checkbox("Opens a chat (needs AI chat)", wf.chat, (x, v) => { at(x).chat = v; }),
+      text("The process, one step per line", () => wf.steps.join("\n"), (x, v) => { at(x).steps = v.split("\n"); },
+        {multiline: true, hint: "Events are MESSAGE, FORM_ANSWER, UPLOAD and REMINDER; name the tools each step calls."}),
+      h("fieldset", {class: "options"}, h("legend", {}, "Activities (generated code)"), ACTIVITIES.map((a) => h("label", {class: "option"},
+        h("input", {type: "checkbox", checked: wf.activities.includes(a.id),
+          onchange: (e) => change((x) => { at(x).activities = toggleIn(at(x).activities, a.id, e.target.checked); }, {structural: true})}),
+        h("span", {}, a.id, h("span", {class: "tag"}, a.service === "app" ? "app" : SERVICES.find((x) => x.id === a.service).name)),
+        h("span", {class: "desc"}, a.summary)))),
+      checkbox("A person approves one of its activities before it runs", wf.approval.on, (x, v) => { at(x).approval.on = v; },
+        {hint: "An activity approval: the agent proposes an action, a person approves, edits or rejects it. It shows in the task inbox."}),
+      wf.approval.on ? h("div", {class: "row"},
+        select("Guarded activity", wf.activities.map((a) => [a, a]), wf.approval.activity, (x, v) => { at(x).approval.activity = v; }),
+        chips("Approvers", st.identity.roles, wf.approval.userRoles, (x, v, on) => { at(x).approval.userRoles = toggleIn(at(x).approval.userRoles, v, on); })) : null),
+    h("button", {type: "button", class: "link danger", onclick: () => change((x) => removeWorkflow(x, wf), {structural: true, undo: `delete the agent ${wf.title}`})}, `Delete ${wf.title}`));
+}
+
+function workflowEditor(wf) {
+  const at = (x) => wfAt(x, wf.id);
+  const st = s();
+  const existing = wf.imported;
+  return h("div", {class: "wf workflow"},
+    h("div", {class: "wf-head"}, h("span", {class: "kind"}, "Workflow"), h("strong", {}, wf.title || wf.name), existing ? h("span", {class: "tag"}, wf.fixedName) : null),
+    text("Name", () => wf.title, (x, v) => { at(x).title = v; }),
+    text("What it does", () => wf.purpose, (x, v) => { at(x).purpose = v; }, {optional: true}),
+    h("div", {class: "field"}, h("span", {class: "label"}, "Request form"),
+      h("small", {}, existing ? "Its input, from the descriptor; the portal starts it through the management API." : "What the requester fills in to start it."),
+      fieldsEditor((x) => at(x).input, (x, v) => { at(x).input = v; }, `${wf.title} start`)),
+    h("div", {class: "field"}, h("span", {class: "label"}, existing ? "Human tasks (from the descriptor)" : "Human tasks, in order"),
+      h("small", {}, existing
+        ? "The descriptor has each task's answer form but not its roles or title: enter the roles the integration assigns, so the preview and the portal route tasks."
+        : "A human task: a person fills in a form and the workflow continues with their answer. The form is generated from the answer fields."),
+      ...(wf.tasks ?? []).map((t, j) => {
+        const task = (x) => at(x).tasks[j];
+        const context = t.context ?? wf.input.map(fieldName);
+        return h("div", {class: "task-edit"},
+          h("div", {class: "row"},
+            text(`Task ${j + 1} title`, () => t.title, (x, v) => { task(x).title = v; if (!task(x).fixedName) task(x).name = v; }, {error: t.title.trim() ? undefined : "Give the task a title."}),
+            chips("Reviewers", st.identity.roles, t.roles, (x, v, on) => { task(x).roles = toggleIn(task(x).roles, v, on); })),
+          existing ? null : text("Instructions", () => t.description, (x, v) => { task(x).description = v; }, {optional: true, hint: "Shown above the form."}),
+          wf.input.length && !existing ? chips("Context the reviewer sees", wf.input.map(fieldName), context, (x, v, on) => { task(x).context = toggleIn(task(x).context ?? at(x).input.map(fieldName), v, on); },
+            {labels: Object.fromEntries(wf.input.map((f) => [fieldName(f), f.label || f.name]))}) : null,
+          h("div", {class: "field"}, h("span", {class: "label"}, "Answer fields"),
+            fieldsEditor((x) => task(x).fields, (x, v) => { task(x).fields = v; }, `Task ${j + 1} answer`),
+            existing ? null : h("small", {}, "Required fields are enforced by the workflow; the form also checks numbers and choices.")),
+          existing ? null : h("button", {type: "button", class: "link danger", onclick: () => change((x) => { at(x).tasks.splice(j, 1); return syncTaskPages(x); }, {structural: true, undo: `remove the task "${t.title}"`})}, "Remove this task"));
+      }),
+      existing ? null : h("button", {type: "button", class: "link", onclick: () => change((x) => {
+        at(x).tasks.push({name: `task${at(x).tasks.length + 1}`, title: "Check it", description: "", roles: x.identity.adminRoles.slice(0, 1),
+          fields: [{name: "approved", label: "Approve", type: "boolean", required: true}]});
+      }, {structural: true})}, "+ Add a task")),
+    existing ? null : advanced("Advanced",
+      text("Code name", () => wf.name, (x, v) => { at(x).name = v; }, {hint: `Start service /start/${wf.name || "name"}; task names ${wfNames(wf).fn}.<task>.`})),
+    h("button", {type: "button", class: "link danger", onclick: () => change((x) => removeWorkflow(x, wf), {structural: true, undo: `delete the workflow ${wf.title}`})}, `Delete ${wf.title}`));
+}
+
+function integrationCard(int) {
+  const at = (x) => intAt(x, int.id);
+  const isNew = int.source === "new";
+  const add = (preset, name) => h("button", {type: "button", class: "card-option small", onclick: () => change((x) => { at(x).workflows.push(newWorkflow(x, preset)); },
+    {structural: true, message: `Added a ${name.toLowerCase()} to ${int.title}.`})}, `+ ${name}`);
+  return h("div", {class: "integration " + (isNew ? "new" : "existing")},
+    h("div", {class: "int-head"}, h("strong", {}, int.title), h("span", {class: "tag"}, isNew ? "new package" : "existing, imported"),
+      h("span", {class: "spacer"}),
+      h("button", {type: "button", class: "link danger", disabled: integrationsOf(s()).length === 1, onclick: () => change((x) => {
+        x.architecture.integrations = x.architecture.integrations.filter((i) => i.id !== int.id);
+        delete x.connections[int.id];
+        const refs = new Set(taskTypes(x).map((t) => t.ref));
+        x.behavior.tasks.typePages = x.behavior.tasks.typePages.filter((r) => refs.has(r));
+        for (const p of x.pages) p.columns = p.columns.map((col) => col.filter((id) => component(x, id)));
+        return syncTaskPages(x);
+      }, {structural: true, undo: `remove the integration ${int.title}`})}, "Remove")),
+    h("div", {class: "row"},
+      text("Name", () => int.title, (x, v) => { at(x).title = v; }),
+      isNew ? text("Ballerina package", () => int.pkg, (x, v) => { at(x).pkg = v.trim(); }, {hint: `backend/${int.pkg || "name"}; lowercase letters, digits, _.`})
+        : h("div", {class: "field"}, h("span", {class: "label"}, "Package"), h("span", {}, `${int.org}/${int.pkg} ${int.version}`),
+          h("small", {}, "Imported from its workflow.def.json; its code isn't generated."))),
+    isNew ? advanced("Package settings",
+      h("div", {class: "row"},
+        text("Ballerina org", () => int.org, (x, v) => { at(x).org = v.trim(); }),
+        text("Run ID prefix", () => int.idPrefix, (x, v) => { at(x).idPrefix = v; }, {hint: `${(int.idPrefix || "RUN").toUpperCase()} gives ${(int.idPrefix || "RUN").toUpperCase()}-1001…`}))) : null,
+    ...int.workflows.map((wf) => wf.kind === "agent" ? agentEditor(wf) : workflowEditor(wf)),
+    isNew ? h("div", {class: "chips"}, add("chat-agent", "Chat agent"), add("agent", "Background agent"), add("approval", "Approval workflow"), add("workflow", "Workflow")) : null);
+}
+
+const count = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+async function importFile(file) {
+  const result = importDescriptor(await file.text(), integrationsOf(s()));
+  if (result.error) {
+    setView({lastChange: {message: result.error, canUndo: false, at: Date.now()}}, "toast");
+    return;
+  }
+  const int = result.integration;
+  change((x) => {
+    x.architecture.integrations.push(int);
+    x.connections[int.id] = {mode: "mock", url: "", mgmtUrl: ""};
+    if (int.workflows.some((w) => (w.tasks ?? []).length) && !x.capabilities.tasks) return setCapability(x, "tasks", true).state;
+    return x.layout.auto ? compose(x) : x;
+  }, {structural: true, undo: `import ${int.title}`,
+    message: `Imported ${int.title}: ${count(int.workflows.filter((w) => w.kind === "workflow").length, "workflow")}, ${count(int.workflows.filter((w) => w.kind === "agent").length, "agent")}. ${result.notes.join(" ")}`});
+}
+
+// ---------------------------------------------------------------- connections (in the architecture step)
+
+export const STATUS_TEXT = {mock: "Mock", unset: "Not configured", untested: "Not tested", ok: "Connected", failed: "Failed"};
+
+// Every live URL the design can set: [test key, connection id, field, catalog probe id, label].
+export function connectionTargets(st = s()) {
+  const out = [];
+  for (const int of integrationsOf(st)) {
+    if (int.source === "new") out.push([`${int.id}.url`, int.id, "url", "app", `${int.title}: app and start API`]);
+    if (managedIntegrations(st).some((i) => i.id === int.id) || int.source === "existing") out.push([`${int.id}.mgmtUrl`, int.id, "mgmtUrl", "workflow", `${int.title}: management API`]);
+  }
+  for (const id of enabledServices(st)) out.push([`commons.${id}`, "commons", id, id, SERVICES.find((x) => x.id === id).name]);
+  return out;
+}
+
+export function connectionStatus(key) {
+  const [connId, field] = key.split(".");
+  const c = s().connections[connId];
+  if (!c || c.mode === "mock") return "mock";
+  if (!String(c[field] ?? "").trim()) return "unset";
+  return store.view.tests[key]?.status ?? "untested";
+}
+
+// A read-only probe: says whether the URL answers, needs a token, blocks CORS, or answers something unexpected.
+export async function testConnection(key, probeId) {
+  const [connId, field] = key.split(".");
+  const def = CONNECTIONS.find((c) => c.id === probeId);
+  const url = String(s().connections[connId][field]).replace(/\/+$/, "") + def.probe;
+  const headers = {"x-user-id": "prompt-builder-test"};
+  if (store.view.token) headers.Authorization = `Bearer ${store.view.token}`;
+  setView({tests: {...store.view.tests, [key]: {status: "untested", message: "Testing…"}}}, "structure");
+  let result;
+  try {
+    const response = await fetch(url, {headers});
+    if (response.status === 401 || response.status === 403) {
+      result = {status: "failed", message: `It answered ${response.status}: sign-in needed. Paste a token below (kept only in this tab), or use development identity on the service.`};
+    } else if (response.status === 404) {
+      result = {status: "failed", message: `${def.probe} wasn't found (404): check the base path, e.g. ${def.placeholder}.`};
+    } else if (!response.ok) {
+      result = {status: "failed", message: `It answered ${response.status} ${response.statusText}.`};
+    } else {
+      const body = await response.json().catch(() => undefined);
+      result = def.expect(body) ? {status: "ok", message: `Connected: ${def.probe} answered as expected.`}
+        : {status: "failed", message: `It answered, but not like the ${def.name} (${def.probe} returned an unexpected shape). Is this the right URL?`};
+    }
+  } catch {
+    result = {status: "failed", message: "No answer: the service isn't reachable from this page, or it blocks this origin (CORS). Check it runs, and add this page's origin to its corsAllowOrigins."};
+  }
+  setView({tests: {...store.view.tests, [key]: result}}, "structure");
+}
+
+function connectionsSection() {
+  const st = s();
+  const targets = connectionTargets(st);
+  const backends = [...new Set(targets.map(([, connId]) => connId))];
+  const title = (connId) => connId === "commons" ? "Commons services" : intAt(st, connId)?.title ?? connId;
+  return section("Connections for the preview", "Each backend runs on sample data (Mock) or a running service (Live). A live request that fails shows its error; the preview never swaps in sample data.",
+    !backends.length ? h("p", {class: "empty-note"}, "This design uses no backends yet.") : null,
+    ...backends.map((connId) => {
+      const c = st.connections[connId] ?? {mode: "mock"};
+      return h("div", {class: "conn"},
+        h("div", {class: "conn-head"}, h("strong", {}, title(connId))),
+        h("div", {class: "segmented", role: "radiogroup", "aria-label": `${title(connId)} data`},
+          ["mock", "live"].map((m) => h("label", {}, h("input", {type: "radio", name: `conn-${connId}`, checked: c.mode === m,
+            onchange: () => change((x) => { x.connections[connId] = {...(x.connections[connId] ?? {}), mode: m}; }, {structural: true})}), m === "mock" ? "Mock" : "Live"))),
+        c.mode === "live" ? targets.filter(([, id]) => id === connId).map(([key, , field, probeId, label]) => {
+          const def = CONNECTIONS.find((d) => d.id === probeId);
+          const status = connectionStatus(key);
+          const test = store.view.tests[key];
+          return h("div", {class: "conn-live"},
+            text(label, () => c[field] ?? "", (x, v) => { x.connections[connId][field] = v; }, {placeholder: def.placeholder}),
+            h("span", {class: `status ${status}`}, STATUS_TEXT[status]),
+            h("button", {type: "button", disabled: !String(c[field] ?? "").trim(), onclick: () => testConnection(key, probeId)}, "Test connection"),
+            test?.message ? h("p", {class: status === "ok" ? "ok-note" : status === "failed" ? "error" : "small", role: "status"}, test.message) : null);
+        }) : null);
+    }),
+    Object.values(st.connections).some((c) => c.mode === "live") ? h("div", {class: "conn-session"},
+      h("div", {class: "field"}, h("label", {for: "session-token"}, "Access token for live services ", h("span", {class: "optional"}, "(optional, this tab only)")),
+        h("input", {id: "session-token", type: "password", value: store.view.token, autocomplete: "off",
+          oninput: (e) => setView({token: e.target.value}, "text")}),
+        h("small", {}, "Sent as a bearer token by the preview and the connection test. It is never saved, shared or exported.")),
+      h("label", {class: "check"}, h("input", {type: "checkbox", checked: store.view.allowLive, onchange: (e) => setView({allowLive: e.target.checked}, "structure")}),
+        h("span", {}, "Let the preview change live services (send messages, complete tasks) this session"))) : null,
+    mixedNotes(st));
+}
+
+// Mixed mock/live designs that can't work, said plainly.
+function mixedNotes(st) {
+  const commons = st.connections.commons?.mode;
+  const notes = [];
+  for (const int of integrationsOf(st).filter((i) => st.connections[i.id]?.mode === "live")) {
+    if (int.workflows.some((w) => w.kind === "agent" && w.chat) && commons !== "live") {
+      notes.push(`${int.title} is live: its chats open in the live chat service, so the mock conversations won't show them. Set the commons services to Live too.`);
+    }
+    if (int.source === "new" && !st.connections[int.id].url && int.workflows.some((w) => (w.tasks ?? []).length)) {
+      notes.push(`${int.title}: tasks come from the live management API, but start forms still create mock runs; set its app URL too.`);
+    }
+  }
+  return notes.length ? h("ul", {class: "issues"}, notes.map((n) => h("li", {class: "warning"}, n))) : null;
+}
+
+export function architectureStep() {
+  const st = s();
+  return [
+    section("The ecosystem", "What runs behind the portal. Each new integration is its own Ballerina package with a start service, an app API and (when it has human tasks) a workflow management API; the commons services are shared.",
+      h("div", {class: "diagram", html: architectureSvg(st)})),
+    section("Integrations", null,
+      ...integrationsOf(st).map(integrationCard),
+      h("div", {class: "chips"},
+        h("button", {type: "button", onclick: () => change((x) => {
+          const int = newIntegration(x.architecture.integrations);
+          x.architecture.integrations.push(int);
+          x.connections[int.id] = {mode: "mock", url: "", mgmtUrl: ""};
+        }, {structural: true, message: "Added a new integration package."})}, "+ New integration"),
+        h("label", {class: "button"}, "Import an existing integration (workflow.def.json)", h("input", {type: "file", accept: "application/json,.json", class: "visually-hidden",
+          onchange: (e) => { const f = e.target.files?.[0]; if (f) void importFile(f); e.target.value = ""; }}))),
+      h("p", {class: "small"}, "An existing integration's descriptor is packed in its JAR: ", h("code", {}, "unzip -p target/bin/<app>.jar workflow.def.json"),
+        ". The portal reaches it through its management API: tasks, approvals, and starting its workflows.")),
+    connectionsSection(),
+    issueList(3)
+  ];
+}
+
+// ---------------------------------------------------------------- 4. capabilities
 
 export function capabilitiesStep() {
   const st = s();
+  const primary = integrationsOf(st).find((i) => i.source === "new");
   return [
-    h("p", {class: "note"}, "Pick what the demo does. Each choice adds its components and the services it needs; nothing else is switched on."),
+    h("p", {class: "note"}, `Pick what the app does. Each choice adds its components and the services it needs; a capability that needs a workflow or an agent adds one to ${primary ? primary.title : "a new integration"}.`),
     h("div", {class: "cap-grid"}, CAPABILITIES.map((cap) => {
       const on = st.capabilities[cap.id];
       const id = `cap-${cap.id}`;
@@ -74,116 +443,11 @@ export function capabilitiesStep() {
         h("div", {class: "adds"}, h("span", {class: "small-label"}, "Adds"), h("ul", {}, cap.adds.map((a) => h("li", {}, a)))),
         cap.requires ? h("p", {class: "small"}, `Needs ${cap.requires.map((r) => CAPABILITIES.find((c) => c.id === r).name).join(", ")}; it's turned on with it.`) : null);
     })),
-    issueList(2)
+    issueList(4)
   ];
 }
 
-// ---------------------------------------------------------------- 3. behavior
-
-const FIELD_TYPES = [["string", "Text"], ["text", "Long text"], ["number", "Number"], ["integer", "Whole number"],
-  ["boolean", "Yes / no"], ["date", "Date"], ["choice", "Choice"]];
-
-// A list of form fields: a start input, or a task's answer or context.
-function fieldsEditor(get, set, what, {emptyHint} = {}) {
-  const fields = get(s());
-  const update = (i, patch, structural = false) => change((x) => { const next = [...get(x)]; next[i] = {...next[i], ...patch}; set(x, next); }, {structural});
-  const names = fields.map(fieldName);
-  return h("div", {class: "fields", role: "group", "aria-label": `${what} fields`},
-    fields.length ? h("div", {class: "field-row head", "aria-hidden": "true"}, h("span", {}, "Label"), h("span", {}, "Type"), h("span", {}, "Required"), h("span")) : null,
-    ...fields.map((f, i) => {
-      const labelError = !String(f.label || f.name || "").trim() ? "Needs a label" : names.indexOf(names[i]) !== i ? "Two fields share this name" : "";
-      const optionsError = f.type === "choice" && !(f.options ?? []).filter(Boolean).length ? "List the options" : "";
-      return h("div", {class: "field-row"},
-        h("input", {type: "text", value: f.label, "aria-label": `${what} field ${i + 1} label`, placeholder: "Label", "aria-invalid": labelError ? "true" : undefined,
-          title: labelError || undefined, oninput: (e) => update(i, {label: e.target.value, name: e.target.value})}),
-        h("select", {"aria-label": `${what} field ${i + 1} type`, onchange: (e) => update(i, {type: e.target.value}, true)},
-          FIELD_TYPES.map(([v, t]) => h("option", {value: v, selected: f.type === v}, t))),
-        h("input", {type: "checkbox", checked: f.required, "aria-label": `${what} field ${i + 1} required`, onchange: (e) => update(i, {required: e.target.checked})}),
-        h("button", {type: "button", class: "icon", "aria-label": `Remove ${what} field ${f.label || i + 1}`,
-          onclick: () => change((x) => set(x, get(x).filter((_, j) => j !== i)), {structural: true, undo: `remove the field "${f.label || i + 1}"`})}, "✕"),
-        f.type === "choice" ? h("input", {type: "text", class: "options", value: (f.options ?? []).join(", "), placeholder: "Options, comma separated",
-          "aria-label": `${what} field ${i + 1} options`, "aria-invalid": optionsError ? "true" : undefined,
-          oninput: (e) => update(i, {options: list(e.target.value)})}) : null,
-        labelError || optionsError ? h("small", {class: "error field-error"}, labelError || optionsError) : null);
-    }),
-    !fields.length && emptyHint ? h("small", {}, emptyHint) : null,
-    h("button", {type: "button", class: "link", onclick: () => change((x) => set(x, [...get(x), {name: "", label: "", type: "string", required: false}]), {structural: true})},
-      "+ Add a field"));
-}
-
-function agentEditor(wf) {
-  const at = (x) => x.workflows.find((w) => w.id === wf.id);
-  const st = s();
-  return h("div", {class: "wf agent"},
-    h("div", {class: "wf-head"}, h("span", {class: "kind"}, "Agent"), h("strong", {}, wf.title || wf.name)),
-    h("div", {class: "row"},
-      text("Name", () => wf.title, (x, v) => { at(x).title = v; }),
-      text("Name in chats", () => wf.displayName, (x, v) => { at(x).displayName = v; }, {hint: "Shown beside its messages."})),
-    text("What it does", () => wf.purpose, (x, v) => { at(x).purpose = v; }, {multiline: true, hint: "Its job, in a sentence; this becomes its role."}),
-    wf.chat ? text("Greeting", () => wf.greeting, (x, v) => { at(x).greeting = v; }, {optional: true,
-      hint: "Posted in the chat as soon as a user starts it, before the agent's first turn."}) : null,
-    h("div", {class: "field"}, h("span", {class: "label"}, "Start form"),
-      h("small", {}, "What a user fills in to start it. The same fields become its input record."),
-      fieldsEditor((x) => at(x).input, (x, v) => { at(x).input = v; }, `${wf.title} start`, {emptyHint: "No fields: the start form is just a button."})),
-    advanced("Advanced: process, activities and approval",
-      text("Code name", () => wf.name, (x, v) => { at(x).name = v; }, {hint: `Chat identity agent:${wf.name || "name"}; start service /start/${wf.name || "name"}.`}),
-      text("The process, one step per line", () => wf.steps.join("\n"), (x, v) => { at(x).steps = v.split("\n"); },
-        {multiline: true, hint: "Events are MESSAGE, FORM_ANSWER, UPLOAD and REMINDER; name the tools each step calls."}),
-      h("fieldset", {class: "options"}, h("legend", {}, "Activities (generated code)"), ACTIVITIES.map((a) => h("label", {class: "option"},
-        h("input", {type: "checkbox", checked: wf.activities.includes(a.id),
-          onchange: (e) => change((x) => { at(x).activities = toggleIn(at(x).activities, a.id, e.target.checked); }, {structural: true})}),
-        h("span", {}, a.id, h("span", {class: "tag"}, a.service === "app" ? "app" : SERVICES.find((x) => x.id === a.service).name)),
-        h("span", {class: "desc"}, a.summary)))),
-      checkbox("A person approves one of its activities before it runs", wf.approval.on, (x, v) => { at(x).approval.on = v; },
-        {hint: "An activity approval: the agent proposes an action, a person approves, edits or rejects it. It shows in the task inbox."}),
-      wf.approval.on ? h("div", {class: "row"},
-        select("Guarded activity", wf.activities.map((a) => [a, a]), wf.approval.activity, (x, v) => { at(x).approval.activity = v; }),
-        chips("Approvers", st.app.roles, wf.approval.userRoles, (x, v, on) => { at(x).approval.userRoles = toggleIn(at(x).approval.userRoles, v, on); })) : null,
-      h("button", {type: "button", class: "link danger", onclick: () => change((x) => {
-        x.workflows = x.workflows.filter((w) => w.id !== wf.id);
-        for (const p of x.pages) p.columns = p.columns.map((col) => col.filter((id) => id !== `start:${wf.id}`));
-      }, {structural: true, undo: `delete the agent ${wf.title}`})}, `Delete ${wf.title}`)));
-}
-
-function workflowEditor(wf) {
-  const at = (x) => x.workflows.find((w) => w.id === wf.id);
-  const st = s();
-  return h("div", {class: "wf workflow"},
-    h("div", {class: "wf-head"}, h("span", {class: "kind"}, "Workflow"), h("strong", {}, wf.title || wf.name)),
-    text("Name", () => wf.title, (x, v) => { at(x).title = v; }),
-    text("What it does", () => wf.purpose, (x, v) => { at(x).purpose = v; }, {optional: true}),
-    h("div", {class: "field"}, h("span", {class: "label"}, "Request form"),
-      h("small", {}, "What the requester fills in to start it."),
-      fieldsEditor((x) => at(x).input, (x, v) => { at(x).input = v; }, `${wf.title} start`)),
-    h("div", {class: "field"}, h("span", {class: "label"}, "Human tasks, in order"),
-      h("small", {}, "A human task: a person fills in a form and the workflow continues with their answer. The form is generated from the answer fields."),
-      ...(wf.tasks ?? []).map((t, j) => {
-        const task = (x) => at(x).tasks[j];
-        const context = t.context ?? wf.input.map(fieldName);
-        return h("div", {class: "task-edit"},
-          h("div", {class: "row"},
-            text(`Task ${j + 1} title`, () => t.title, (x, v) => { task(x).title = v; task(x).name = task(x).fixedName ?? v; }, {error: t.title.trim() ? undefined : "Give the task a title."}),
-            chips("Reviewers", st.app.roles, t.roles, (x, v, on) => { task(x).roles = toggleIn(task(x).roles, v, on); })),
-          text("Instructions", () => t.description, (x, v) => { task(x).description = v; }, {optional: true, hint: "Shown above the form."}),
-          wf.input.length ? chips("Context the reviewer sees", wf.input.map(fieldName), context, (x, v, on) => { task(x).context = toggleIn(task(x).context ?? at(x).input.map(fieldName), v, on); },
-            {labels: Object.fromEntries(wf.input.map((f) => [fieldName(f), f.label || f.name]))}) : null,
-          h("div", {class: "field"}, h("span", {class: "label"}, "Answer fields"),
-            fieldsEditor((x) => task(x).fields, (x, v) => { task(x).fields = v; }, `Task ${j + 1} answer`),
-            h("small", {}, "Required fields are enforced by the workflow; the form also checks numbers and choices.")),
-          h("p", {class: "small"}, "Actions: Complete (sends the answer) or Can't do this (fails the task with a reason)."),
-          h("button", {type: "button", class: "link danger", onclick: () => change((x) => { at(x).tasks.splice(j, 1); }, {structural: true, undo: `remove the task "${t.title}"`})}, "Remove this task"));
-      }),
-      h("button", {type: "button", class: "link", onclick: () => change((x) => {
-        at(x).tasks.push({name: `task${at(x).tasks.length + 1}`, title: "Check it", description: "", roles: x.app.adminRoles.slice(0, 1),
-          fields: [{name: "approved", label: "Approve", type: "boolean", required: true}]});
-      }, {structural: true})}, "+ Add a task")),
-    advanced("Advanced",
-      text("Code name", () => wf.name, (x, v) => { at(x).name = v; }, {hint: `Start service /start/${wf.name || "name"}.`}),
-      h("button", {type: "button", class: "link danger", onclick: () => change((x) => {
-        x.workflows = x.workflows.filter((w) => w.id !== wf.id);
-        for (const p of x.pages) p.columns = p.columns.map((col) => col.filter((id) => id !== `start:${wf.id}`));
-      }, {structural: true, undo: `delete the workflow ${wf.title}`})}, `Delete ${wf.title}`)));
-}
+// ---------------------------------------------------------------- 5. behavior
 
 const TYPE_PRESETS = [["", "Any file"], ["image/*", "Images"], ["application/pdf", "PDF"], ["application/pdf,image/*", "Images or PDF"]];
 // Accepted types in a fixed order, so "image/*, application/pdf" matches its preset.
@@ -205,7 +469,7 @@ function uploadsEditor() {
         checkbox("Required", sl.required, (x, v) => { at(x, i).required = v; })),
       h("button", {type: "button", class: "link danger", onclick: () => change((x) => { x.behavior.uploads.slots.splice(i, 1); }, {structural: true, undo: `remove the slot "${sl.label}"`})}, "Remove this slot"))),
     h("button", {type: "button", class: "link", onclick: () => change((x) => { x.behavior.uploads.slots.push({name: "", label: "", mimeTypes: [], maxFiles: 1, required: false}); }, {structural: true})}, "+ Add a slot"),
-    h("p", {class: "small"}, "Limits: the attachment service accepts files up to its maxFileBytes (10 MB by default). In the preview, mock uploads stay in this browser tab and are gone after a reload; a live attachment service stores them in its database or on disk.")
+    h("p", {class: "small"}, "Limits: the attachment service accepts files up to its maxFileBytes (10 MB by default). In the preview, mock uploads stay in this browser tab and are gone after a reload.")
   ];
 }
 
@@ -217,45 +481,58 @@ function notificationsEditor() {
       (x, v) => { x.bell.opens = v === "drawer" ? "drawer" : "notifications"; if (!x.layout.auto && v === "page" && !x.pages.some((p) => p.id === "notifications")) x.pages.push({id: "notifications", title: "Notifications", layout: "single", ratio: 50, collapsible: true, columns: [["inbox"], []]}); }),
     select("Show", [["both", "Personal and role notifications (tabs)"], ["personal", "Personal notifications only"], ["role", "Role notifications only"]], n.scope,
       (x, v) => { x.behavior.notifications.scope = v; }),
-    h("fieldset", {class: "options"}, h("legend", {}, "Notify people when"),
+    h("fieldset", {class: "options"}, h("legend", {}, "The new integrations notify people when"),
       checkbox("A run starts (the person who started it)", n.events.runStarted, (x, v) => { x.behavior.notifications.events.runStarted = v; }),
       checkbox("A task is assigned (the reviewer roles)", n.events.taskAssigned, (x, v) => { x.behavior.notifications.events.taskAssigned = v; },
         {hint: st.capabilities.tasks ? undefined : "Applies once human tasks are on."}),
       checkbox("A run finishes (the person who started it)", n.events.runFinished, (x, v) => { x.behavior.notifications.events.runFinished = v; })),
-    h("p", {class: "small"}, "Clicking a notification opens the run it is about: its conversation, or its tasks.")
+    h("p", {class: "small"}, "Clicking a notification opens the run it is about: its conversation, or its tasks. Existing integrations send their own notifications, if any.")
+  ];
+}
+
+function tasksEditor() {
+  const st = s();
+  const t = st.behavior.tasks;
+  const types = taskTypes(st);
+  const sync = (fn) => (x, v) => { fn(x, v); return syncTaskPages(x); };
+  return [
+    h("p", {class: "note"}, "How people find their work. Each task inbox reads one integration's workflow management API; it shows the tasks and approvals the signed-in user's roles may act on."),
+    h("label", {class: "check"}, h("input", {type: "checkbox", checked: t.inbox, onchange: (e) => change((x) => sync((y, v) => { y.behavior.tasks.inbox = v; })(x, e.target.checked), {structural: true})}),
+      h("span", {}, "A Tasks page listing every task", h("small", {class: "block"}, `From ${managedIntegrations(st).map((i) => i.title).join(", ") || "each integration with tasks"}; one inbox per integration.`))),
+    types.length ? h("fieldset", {class: "options"}, h("legend", {}, "A page for one kind of task"),
+      types.map((type) => h("label", {class: "check"}, h("input", {type: "checkbox", checked: t.typePages.includes(type.ref),
+        onchange: (e) => change((x) => sync((y, v) => { y.behavior.tasks.typePages = toggleIn(y.behavior.tasks.typePages, type.ref, v); })(x, e.target.checked), {structural: true})}),
+        h("span", {}, `${type.task.title || type.task.name}`, h("small", {class: "block"}, `${type.integration.title} · ${type.workflow.title || type.workflow.name} · ${type.task.roles.join(", ") || "anyone"}`))))) :
+      h("p", {class: "small"}, "No human tasks yet: add them to a workflow in the Architecture step.")
   ];
 }
 
 export function behaviorStep() {
   const st = s();
   const c = st.capabilities;
-  const agents = st.workflows.filter((w) => w.kind === "agent");
-  const flows = st.workflows.filter((w) => w.kind === "workflow");
   const out = [];
-  if (!Object.values(c).some(Boolean) && !st.workflows.length) {
-    out.push(h("p", {class: "empty-note"}, "Choose capabilities in step 2 first; their settings appear here."));
+  if (!Object.values(c).some(Boolean)) {
+    out.push(h("p", {class: "empty-note"}, "Choose capabilities in step 4 first; their settings appear here. Workflows and agents are edited in the Architecture step."));
   }
-  if (c.chat || agents.length) out.push(section("AI chat", c.chat ? "The agent that owns each conversation." : "Agents (chat is off, so they don't open a chat).", ...agents.map(agentEditor)));
+  if (c.tasks) out.push(section("Human tasks", null, ...tasksEditor()));
   if (c.uploads) out.push(section("File uploads", null, ...uploadsEditor()));
   if (c.notifications) out.push(section("Notifications", null, ...notificationsEditor()));
-  if (c.tasks || flows.length) out.push(section("Human tasks", "The workflows people take part in through the task inbox.", ...flows.map(workflowEditor)));
-  if (c.runs) out.push(section("Run tracking", "My runs lists what the signed-in user started, newest first, with the status the workflow or agent sets."));
-  out.push(advanced("Add another workflow or agent",
-    h("div", {class: "cards"}, [["chat-agent", "Chat agent"], ["agent", "Background agent"], ["approval", "Approval workflow"], ["workflow", "Workflow"]].map(([id, name]) =>
-      h("button", {type: "button", class: "card-option", onclick: () => change((x) => { x.workflows.push(newWorkflow(x, id)); }, {structural: true, message: `Added a ${name.toLowerCase()}.`})}, `+ ${name}`)))));
-  out.push(issueList(3));
+  if (c.chat) out.push(section("AI chat", `The chat agents: ${workflowsOf(st).filter((w) => w.kind === "agent" && w.chat).map((w) => w.title).join(", ") || "none yet"}. Their greeting, process and activities are in the Architecture step.`));
+  if (c.runs) out.push(section("Run tracking", "My runs lists what the signed-in user started in the new integrations, newest first, with the status the workflow or agent sets."));
+  out.push(issueList(5));
   return out;
 }
 
-// ---------------------------------------------------------------- 4. portal
+// ---------------------------------------------------------------- 6. portal
 
 const label = (c) => c.name;
 
 function addable() {
   const st = s();
   const groups = [];
-  if (st.workflows.length) groups.push(["Start forms", st.workflows.map((w) => component(st, `start:${w.id}`))]);
-  groups.push(["Human tasks", COMPONENTS.filter((c) => c.service === "workflow")]);
+  const all = workflowsOf(st);
+  if (all.length) groups.push(["Start forms", all.map((w) => component(st, `start:${w.id}`))]);
+  groups.push(["Human tasks", [...COMPONENTS.filter((c) => c.service === "workflow"), ...taskTypes(st).map((t) => component(st, `task-inbox@${t.ref}`))]]);
   groups.push(...SERVICES.map((svc) => [svc.name, COMPONENTS.filter((c) => c.service === svc.id && !c.header)]));
   groups.push(["The app's own", COMPONENTS.filter((c) => c.app && !c.header)]);
   if (st.custom.length) groups.push(["Custom", st.custom]);
@@ -340,6 +617,7 @@ export function portalStep() {
   const st = s();
   const headerChoices = [...COMPONENTS.filter((c) => c.header), ...st.custom];
   return [
+    h("p", {class: "note"}, "The portal opens on the login screen (step 2); these are the pages behind it."),
     section("Navigation", null,
       radios("shell", LAYOUTS.map((l) => ({...l, undo: undefined})), st.layout.shell, (x, v) => { x.layout.shell = v; }),
       st.layout.shell === "sidebar" ? checkbox("The sidebar collapses to a rail", st.layout.collapsible, (x, v) => { x.layout.collapsible = v; }) : null,
@@ -381,135 +659,24 @@ export function portalStep() {
         customize(x);
         x.pages[0].columns[0].push(id);
       }, {structural: true, message: "Added a custom component to Home."})}, "+ Add a custom component")),
-    issueList(4)
+    issueList(6)
   ];
 }
 
-// ---------------------------------------------------------------- 5. services
+// ---------------------------------------------------------------- technical settings (in the review step)
 
-export const STATUS_TEXT = {mock: "Mock", unset: "Not configured", untested: "Not tested", ok: "Connected", failed: "Failed"};
-
-export function connectionStatus(id) {
-  const c = s().connections[id];
-  if (c.mode === "mock") return "mock";
-  if (!c.url.trim()) return "unset";
-  return store.view.tests[id]?.status ?? "untested";
-}
-
-// Which connections this design uses.
-export function neededConnections(st = s()) {
-  const services = enabledServices(st);
-  return CONNECTIONS.filter((c) => c.id === "app" ? st.workflows.length || usedComponents(st).includes("runs")
-    : c.id === "workflow" ? usesManagementApi(st) : services.includes(c.id));
-}
-
-// A read-only probe: says whether the URL answers, needs a token, blocks CORS, or answers something unexpected.
-export async function testConnection(id) {
-  const def = CONNECTIONS.find((c) => c.id === id);
-  const url = s().connections[id].url.replace(/\/+$/, "") + def.probe;
-  const headers = {"x-user-id": "prompt-builder-test"};
-  if (store.view.token) headers.Authorization = `Bearer ${store.view.token}`;
-  setView({tests: {...store.view.tests, [id]: {status: "untested", message: "Testing…"}}}, "structure");
-  let result;
-  try {
-    const response = await fetch(url, {headers});
-    if (response.status === 401 || response.status === 403) {
-      result = {status: "failed", message: `It answered ${response.status}: sign-in needed. Paste a token below (kept only in this tab), or use development identity on the service.`};
-    } else if (response.status === 404) {
-      result = {status: "failed", message: `${def.probe} wasn't found (404): check the base path, e.g. ${def.placeholder}.`};
-    } else if (!response.ok) {
-      result = {status: "failed", message: `It answered ${response.status} ${response.statusText}.`};
-    } else {
-      const body = await response.json().catch(() => undefined);
-      result = def.expect(body) ? {status: "ok", message: `Connected: ${def.probe} answered as expected.`}
-        : {status: "failed", message: `It answered, but not like the ${def.name} (${def.probe} returned an unexpected shape). Is this the right URL?`};
-    }
-  } catch {
-    result = {status: "failed", message: "No answer: the service isn't reachable from this page, or it blocks this origin (CORS). Check it runs, and add this page's origin to its corsAllowOrigins."};
-  }
-  setView({tests: {...store.view.tests, [id]: result}}, "structure");
-}
-
-export function servicesStep() {
+export function technicalSettings() {
   const st = s();
-  const needed = neededConnections(st);
-  const idp = IDPS.find((i) => i.id === st.idp.kind);
-  return [
-    section("Data for the preview", "Each service the design uses can run on sample data (Mock) or a running service (Live). A live request that fails shows its error; the preview never swaps in sample data.",
-      !needed.length ? h("p", {class: "empty-note"}, "This design uses no services yet.") : null,
-      ...needed.map((def) => {
-        const c = st.connections[def.id];
-        const status = connectionStatus(def.id);
-        const test = store.view.tests[def.id];
-        return h("div", {class: "conn"},
-          h("div", {class: "conn-head"}, h("strong", {}, def.name), h("span", {class: `status ${status}`}, STATUS_TEXT[status])),
-          h("small", {}, `Used by: ${def.uses}.`),
-          h("div", {class: "segmented", role: "radiogroup", "aria-label": `${def.name} data`},
-            ["mock", "live"].map((m) => h("label", {}, h("input", {type: "radio", name: `conn-${def.id}`, checked: c.mode === m,
-              onchange: () => change((x) => { x.connections[def.id].mode = m; }, {structural: true})}), m === "mock" ? "Mock" : "Live"))),
-          c.mode === "live" ? h("div", {class: "conn-live"},
-            text("URL", () => c.url, (x, v) => { x.connections[def.id].url = v; }, {placeholder: def.placeholder, error: c.url.trim() ? undefined : "Enter the service's base URL."}),
-            h("button", {type: "button", disabled: !c.url.trim(), onclick: () => testConnection(def.id)}, "Test connection"),
-            test?.message ? h("p", {class: status === "ok" ? "ok-note" : status === "failed" ? "error" : "small", role: "status"}, test.message) : null) : null);
-      }),
-      needed.some((d) => st.connections[d.id].mode === "live") ? h("div", {class: "conn-session"},
-        h("div", {class: "field"}, h("label", {for: "session-token"}, "Access token for live services ", h("span", {class: "optional"}, "(optional, this tab only)")),
-          h("input", {id: "session-token", type: "password", value: store.view.token, autocomplete: "off",
-            oninput: (e) => setView({token: e.target.value}, "text")}),
-          h("small", {}, "Sent as a bearer token by the preview and the connection test. It is never saved, shared or exported.")),
-        h("label", {class: "check"}, h("input", {type: "checkbox", checked: store.view.allowLive, onchange: (e) => setView({allowLive: e.target.checked}, "structure")}),
-          h("span", {}, "Let the preview change live services (send messages, complete tasks) this session"))) : null,
-      mixedNotes(st)),
-    section("Sign-in", "How users sign in to the generated portal.",
-      radios("idp", IDPS.map((i) => ({id: i.id, name: i.name, tag: i.license, desc: i.summary})), st.idp.kind,
-        (x, v) => { x.idp = {...x.idp, kind: v, ...IDPS.find((i) => i.id === v).defaults}; }),
-      idp.id === "none" ? h("p", {class: "small"}, "Development only: the services trust x-user-* headers, like the preview's personas.") : advanced(`${idp.name} settings`,
-        h("div", {class: "row"},
-          text("Issuer", () => st.idp.issuer, (x, v) => { x.idp.issuer = v; }),
-          text("JWKS URL", () => st.idp.jwksUrl, (x, v) => { x.idp.jwksUrl = v; })),
-        h("div", {class: "row"},
-          text("Authorize URL", () => st.idp.authorizeUrl, (x, v) => { x.idp.authorizeUrl = v; }),
-          text("Token URL", () => st.idp.tokenUrl, (x, v) => { x.idp.tokenUrl = v; })),
-        h("div", {class: "row"},
-          text("Client ID", () => st.idp.clientId, (x, v) => { x.idp.clientId = v; }),
-          text("Scopes", () => st.idp.scopes, (x, v) => { x.idp.scopes = v; })),
-        h("div", {class: "row"},
-          text("User ID claim", () => st.idp.userIdClaim, (x, v) => { x.idp.userIdClaim = v; }),
-          text("Roles claim", () => st.idp.rolesClaim, (x, v) => { x.idp.rolesClaim = v; }, {hint: "An array or a comma list; dotted paths for nested claims."})),
-        usesManagementApi(st) ? text("Token audience (aud)", () => st.idp.audience, (x, v) => { x.idp.audience = v; }, {optional: true, hint: "The management API checks it; empty uses the client ID."}) : null)),
-    advanced("Technical settings: packages, database, stack, assistants, deployment",
-      h("div", {class: "row"},
-        text("Ballerina org", () => st.app.org, (x, v) => { x.app.org = v; }),
-        text("Package name", () => st.app.pkg, (x, v) => { x.app.pkg = v; })),
-      h("div", {class: "row"},
-        text("Run ID prefix", () => st.app.idPrefix, (x, v) => { x.app.idPrefix = v; }, {hint: "RUN gives RUN-1001, RUN-1002…"}),
-        select("Database", DATABASES.map((d) => [d.id, d.name]), st.db, (x, v) => { x.db = v; })),
-      select("Frontend stack of the generated portal", FRAMEWORKS.map((f) => [f.id, f.name]), st.frontend.framework, (x, v) => { x.frontend.framework = v; },
-        {hint: FRAMEWORKS.find((f) => f.id === st.frontend.framework).note}),
-      h("div", {class: "row"},
-        select("Backend assistant", [["claude", ASSISTANTS.claude.name], ["copilot", ASSISTANTS.copilot.name]], st.assistants.backend, (x, v) => { x.assistants.backend = v; }),
-        select("Workflow assistant", [["claude", ASSISTANTS.claude.name], ["copilot", ASSISTANTS.copilot.name]], st.assistants.workflow, (x, v) => { x.assistants.workflow = v; })),
-      h("div", {class: "row"},
-        select("Prompts", [["steps", "Step by step, with checks"], ["full", "One prompt per part"]], st.style, (x, v) => { x.style = v; }),
-        select("Run it with", [["local", "bal run and a Temporal dev server"], ["compose", "Docker Compose"]], st.deploy, (x, v) => { x.deploy = v; }))),
-    issueList(5)
-  ];
-}
-
-// Mixed mock/live designs that can't work, said plainly.
-function mixedNotes(st) {
-  const mode = (id) => st.connections[id]?.mode;
-  const notes = [];
-  if (mode("app") === "live" && st.workflows.some((w) => w.kind === "agent" && w.chat) && mode("chat") === "mock") {
-    notes.push("A live start service opens its chats in the live chat service, so the mock conversations won't show them. Set Chat to Live too.");
-  }
-  if (mode("workflow") === "live" && mode("app") === "mock" && st.workflows.some((w) => w.kind === "workflow")) {
-    notes.push("Tasks come from the live workflow app, but start forms create mock runs: a run started in the preview won't appear in the live task inbox.");
-  }
-  if (mode("attachment") === "mock" && mode("app") === "live" && st.capabilities.uploads) {
-    notes.push("Supported: live workflows with mock uploads. Upload cards the live agent creates refer to live cases, which the mock attachment service doesn't have.");
-  }
-  return notes.length ? h("ul", {class: "issues"}, notes.map((n) => h("li", {class: "warning"}, n))) : null;
+  return advanced("Technical settings: database, stack, assistants, deployment",
+    h("div", {class: "row"},
+      select("Database", DATABASES.map((d) => [d.id, d.name]), st.db, (x, v) => { x.db = v; }),
+      select("Run it with", [["local", "bal run and a Temporal dev server"], ["compose", "Docker Compose"]], st.deploy, (x, v) => { x.deploy = v; })),
+    select("Frontend stack of the generated portal", FRAMEWORKS.map((f) => [f.id, f.name]), st.frontend.framework, (x, v) => { x.frontend.framework = v; },
+      {hint: FRAMEWORKS.find((f) => f.id === st.frontend.framework).note}),
+    h("div", {class: "row"},
+      select("Backend assistant", [["claude", ASSISTANTS.claude.name], ["copilot", ASSISTANTS.copilot.name]], st.assistants.backend, (x, v) => { x.assistants.backend = v; }),
+      select("Workflow assistant", [["claude", ASSISTANTS.claude.name], ["copilot", ASSISTANTS.copilot.name]], st.assistants.workflow, (x, v) => { x.assistants.workflow = v; })),
+    select("Prompts", [["steps", "Step by step, with checks"], ["full", "One prompt per part"]], st.style, (x, v) => { x.style = v; }));
 }
 
 export {wfNames};

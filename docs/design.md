@@ -25,46 +25,47 @@ What works, and what to keep:
 
 ## Screen flow
 
-A persistent step bar with six steps; each step has Back and Continue. The preview sits beside the steps on desktop,
-and behind a Configure / Preview switch on narrow screens.
+A persistent step bar with seven steps; each step has Back and Continue. The preview sits beside the steps on
+desktop, and behind a Configure / Preview switch on narrow screens. The builder designs an ecosystem, not one app:
+who signs in, which backends exist, and only then what the portal shows.
 
-1. **Describe your demo.** Name, purpose, roles, and a starting scenario (AI assistant, approval portal, document
-   collection, custom). A scenario sets capabilities and defaults; everything stays editable.
-2. **Choose capabilities.** Cards for AI chat, file uploads, notifications, human tasks and run tracking. Each card
-   shows an example and the components it adds. Toggling one explains what changed and offers Undo.
-3. **Configure behaviour.** One section per enabled capability: the agent (purpose, greeting, start input), upload
-   slots, notification destination, scope and events, and the task forms (title, instructions, reviewers, context
-   fields, answer fields). The process, activities and approvals are under "Advanced".
-4. **Arrange your portal.** Navigation style and pages. The layout is composed from the capabilities until you edit
+1. **Describe your app.** Name, purpose and a template (AI assistant, approval portal, document collection,
+   custom). A template sets capabilities and an editable integration.
+2. **Identity and sign-in.** The identity provider, the login screen, roles and admin roles, the initial users and
+   their roles, and the claims (user ID, roles, audience). The starter carries a seed file the provider loads.
+3. **Design the architecture.** A diagram of the portal, the identity provider, the integrations and the commons
+   services. Each new integration is a Ballerina package with its workflows, agents, human tasks and approvals.
+   An existing one is imported from its `workflow.def.json`; the user adds the reviewer roles. Mock or live per
+   backend, with a read-only connection test.
+4. **Choose capabilities.** Cards for AI chat, file uploads, notifications, human tasks and run tracking. A
+   capability that needs a workflow or agent adds one to the first new integration.
+5. **Configure behavior.** Human tasks as one Tasks page (an inbox per integration with tasks) and/or a page per task
+   type (an inbox filtered by the qualified task name `<workflow>.<task>`), upload slots, and notifications.
+6. **Arrange your portal.** Navigation style and pages. The layout is composed from the capabilities until you edit
    it; after that, capability changes add or remove components in place.
-5. **Connect services.** Mock or live per service, with a status (Mock, Not configured, Not tested, Connected,
-   Failed) and an explicit read-only connection test. Sign-in, database, packages, frontend stack, assistants and
-   deployment are here, most under "Technical settings".
-6. **Review and generate.** A summary with an Edit link per decision. It lists the required services, what stays
-   mocked, what developers must supply, and blockers versus suggestions, and has the outputs: prompts, starter
-   download, share link, and configuration export.
+7. **Review and generate.** A summary with an Edit link per decision, the technical settings, what developers must
+   supply, blockers versus suggestions, and the outputs.
 
 "Advanced" (in the header) shows every step's settings on one page, over the same configuration.
 
-## Configuration model (version 4)
+## Configuration model (version 5)
 
 `state.js` holds the exported configuration only. The wizard step, preview selection, undo stack, session tokens and
-connection test results are editor state (`view` in `app.js`) and never enter share links or exports.
+connection test results are editor state and never enter share links or exports.
 
 | Key | Holds |
 |---|---|
-| `app` | Name, purpose, roles, admin roles, run ID prefix, Ballerina org and package |
-| `scenario` | The scenario the design started from (informational) |
+| `app` | Name and purpose |
+| `identity` | `idp` (kind, endpoints, client, claims, audience), `roles`, `adminRoles`, `users` (username, name, email, roles), `login` (title, subtitle) |
+| `architecture.integrations` | Per integration: `id`, `source` (`new` or `existing`), title, org, package, run ID prefix, and its `workflows` (agents and workflows; imported ones keep `fixedName`s from the descriptor) |
 | `capabilities` | `chat`, `uploads`, `notifications`, `tasks`, `runs` flags |
-| `behavior.uploads` | Named slots: label, accepted types, max files, required |
-| `behavior.notifications` | Scope and events: run started, task assigned, run finished |
-| `workflows` | Agents and workflows (version 3 shape, plus `greeting`) |
-| `layout`, `header`, `bell`, `pages`, `custom` | The portal (version 3 shape); `layout.auto` says whether pages follow the capabilities |
-| `connections` | Per service: `mode` (`mock` or `live`) and `url`. Never tokens |
-| `frontend`, `db`, `idp`, `assistants`, `style`, `deploy` | Technical settings |
+| `behavior` | `uploads.slots`, `notifications` (scope, events), `tasks` (`inbox`, `typePages`: `<integration>:<workflow>.<task>` refs) |
+| `layout`, `header`, `bell`, `pages`, `custom` | The portal; `layout.auto` says whether pages follow the capabilities. Component IDs `start:<workflow>` and `task-inbox@<ref>` are parameterized |
+| `connections` | `commons` (mode and a URL per service) and one entry per integration (mode, `url`, `mgmtUrl`). Never tokens |
+| `frontend`, `db`, `assistants`, `style`, `deploy` | Technical settings |
 
-`migrate()` upgrades version 3 links: it infers the capabilities from the design, sets `layout.auto = false` (the
-pages were hand-made) and fills in the new keys. Versions below 3 open a blank app with a notice.
+`migrate()` upgrades version 3 and 4 links. The old app becomes the first integration, the roles get one user each,
+and `layout.auto` is off for version 3 (its pages were hand-made). Versions below 3 open a blank app with a notice.
 
 ## Modules
 
@@ -73,7 +74,10 @@ pages were hand-made) and fills in the new keys. Versions below 3 open a blank a
 | `js/catalog.js` | Services, components, capabilities (defaults, dependencies, the components each adds), scenarios, identity providers, versions |
 | `js/contracts.js` | Schemas both the preview and the generator use: the start form's JSON Schema, and the task form schema workflow 0.10.0 generates from a record type |
 | `js/compose.js` | Applying a capability or scenario, composing pages, and `diagnostics()` (issues with fixes) |
-| `js/state.js` | The configuration, migration, encoding, derived services |
+| `js/state.js` | The configuration, migration, encoding, derived services (the integrations the portal manages, task types) |
+| `js/identity.js` | The Keycloak realm or Thunder resources seed file, and the claims each backend reads |
+| `js/descriptor.js` | Maps a `workflow.def.json` to an existing integration: workflows, agents, input and answer fields (lossy schemas become text) |
+| `js/diagram.js` | The architecture diagram (SVG) |
 | `js/code.js`, `js/prompts.js`, `js/wireframe.js` | Generators (unchanged role) |
 | `js/ui/*.js` | The wizard steps, review, advanced mode |
 | `preview.html`, `js/preview/runtime.js` | The interactive preview: renders the portal with the real bal-commons components |
@@ -82,9 +86,10 @@ pages were hand-made) and fills in the new keys. Versions below 3 open a blank a
 ## Data adapters
 
 The preview runs in an iframe. Components get a base URL per service:
-- **Mock:** `https://mock.preview/<service>`. The runtime replaces `fetch` and `EventSource` inside the iframe and
+- **Mock:** `https://mock.preview/<service>` for the commons services and `https://mock.preview/int/<id>/app-service`
+  and `/int/<id>/workflow` per integration. The runtime replaces `fetch` and `EventSource` inside the iframe and
   answers those URLs from `mock.js`.
-- **Live:** the URL from step 5. Requests go to the network unchanged. A failure shows as the component's error; the
+- **Live:** the URLs from step 3. Requests go to the network unchanged. A failure shows as the component's error; the
   preview never falls back to sample data. Live services are read-only in the preview until the user allows
   changes for the session.
 
@@ -93,34 +98,20 @@ the notification service, chat service, attachment service, workflow management 
 activities) and the generated start service. Each route is listed in `mock.js`. Sample data is seeded from the
 configuration, marked "sample", and kept in `sessionStorage` so a preview reload keeps its conversations and runs.
 
-## Plan
-
-| Phase | Work | Modules |
-|---|---|---|
-| 1 | Wizard, scenarios, capabilities with dependencies and undo, contextual behaviour settings, auto-composed layout, diagnostics, review screen, version 4 model and migration, draft recovery, synchronized interactive preview with mock adapters, personas | `catalog`, `contracts`, `compose`, `state`, `ui/*`, `preview/*`, `code`, `prompts` |
-| 2 | Richer simulations (another reviewer completes a task, slow network, service error, stream reconnect) and live connection tests | `preview/*`, `ui/connect` |
-| 3 | Configuration import and export files, an example configuration, and live-mode preview with a session token | `ui/review`, `state` |
-
-The phase numbers are the order of work. The report at the end of the change says what shipped.
-
-## What shipped in this change
+## What shipped
 
 | Item | State |
 |---|---|
-| Six-step wizard, step bar with blocker counts, Back and Continue, Advanced mode | Done |
-| Scenarios (AI assistant, approval portal, document collection, custom) | Done |
-| Capabilities with dependencies, explanations and Undo; configuration kept when a capability is toggled | Done |
-| Contextual behavior: agent greeting and start form, upload slots, notification destination, scope and events, task instructions, context and answer fields | Done; the generators emit all of them |
-| Suggested layout that follows capabilities until edited; in-place changes afterwards | Done |
-| `diagnostics()`: blockers and suggestions with fixes | Done |
-| Interactive preview with real components, personas, sample data, simulated agent, notification-to-run navigation | Done |
-| Simulations: a failing request, a slow network, another reviewer, a reset | Done |
-| Mock or Live per service, status, read-only connection test, session-only token, live changes gated | Done. The live preview hasn't run against real services |
-| Draft recovery, share links, version 3 migration, configuration export and import | Done |
-| Starter with setup steps, what to supply, and `builder-config.json` | Done |
+| Seven-step wizard, step bar with blocker counts, Back and Continue, Advanced mode | Done |
+| Templates, capabilities with dependencies, explanations and Undo | Done |
+| Identity step: provider, login screen, roles, users, claims; Keycloak and Thunder seed files | Done; the seed files aren't yet loaded into a running Keycloak or Thunder by the checks |
+| Architecture step: diagram, new and imported integrations, one package each plus a commons package | Done; every variant compiles |
+| Human tasks as one inbox per integration and pages per task type | Done |
+| Interactive preview with a login screen, users from the identity step, multi-integration mocks, simulated agent | Done |
+| Mock or Live per backend, status, read-only connection test, session-only token, live changes gated | Done. The live preview hasn't run against real services |
+| Draft recovery, share links, version 3 and 4 migration, configuration export and import | Done |
 
 Deferred:
+- Reading existing integrations from a running management API (`/definitions`) or a JAR, instead of the descriptor.
 - Live-mode verification against running services.
 - Stream reconnect simulation. The components refetch on reconnect; the mock streams don't drop.
-- Per-field validation beyond what workflow 0.10.0 enforces: the answer schema carries types, enums and required,
-  not ranges.

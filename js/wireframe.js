@@ -1,5 +1,6 @@
-import {inputSchema} from "./prompts.js";
-import {component, HUB_PANES, pageComponents} from "./state.js";
+import {IDPS} from "./catalog.js";
+import {startInputSchema} from "./contracts.js";
+import {component, findWorkflow, HUB_PANES, pageComponents, primaryIntegration, taskTypes} from "./state.js";
 
 // Wireframes of the app's screens as SVG boxes: layout only, the components bring their own look.
 
@@ -10,10 +11,15 @@ const H = 480;
 function sketch(state, id) {
   const c = component(state, id);
   if (c?.start) {
-    const wf = state.workflows.find((w) => w.id === c.start);
-    const fields = Object.entries(inputSchema(wf.input).properties).map(([, p]) => `${p.title}: [          ]`);
+    const wf = findWorkflow(state, c.start);
+    const fields = Object.entries(startInputSchema(wf.input).properties).map(([, p]) => `${p.title}: [          ]`);
     return [...fields.slice(0, 3), `[ ${wf.kind === "agent" ? "Start" : "Submit"} ]`];
   }
+  if (c?.taskType) {
+    const t = taskTypes(state).find((x) => x.ref === c.taskType);
+    return [`${t.task.title || t.task.name} · RUN-1002`, `${t.task.title || t.task.name} · RUN-1001`, "…"];
+  }
+  const prefix = (primaryIntegration(state)?.idPrefix || "RUN").toUpperCase();
   const lines = {
     "bell": ["🔔 ②"],
     "inbox": ["All | Personal | Roles   ☐ Unread  severity ▾", "● WARNING  Needs attention …", "● INFO     Run started …", "  SUCCESS  Done …"],
@@ -22,7 +28,7 @@ function sketch(state, id) {
     "upload-case": ["Files 1/3 · image/*   [▢][▢]", "┆ Drop files here or choose ┆", "[ Submit ]"],
     "case-list": ["title · Needs your upload", "▓▓▓▓░░ 2/3 slots", "title · submitted"],
     "file-viewer": ["[img] [img] [PDF]", "Download · Delete"],
-    "runs": [`${(state.app.idPrefix || "RUN").toUpperCase()}-1002 · title · RUNNING`, `${(state.app.idPrefix || "RUN").toUpperCase()}-1001 · title · DONE`, "…"],
+    "runs": [`${prefix}-1002 · title · RUNNING`, `${prefix}-1001 · title · DONE`, "…"],
     "task-inbox": ["Review the request     Task", "Approve payOut    Approval", "…"],
     "task-form": ["Title · pending", "About: fields of the run", "[generated form fields]", "[ Complete ]  Can't do this"],
     "user-menu": ["user ▾"]
@@ -99,6 +105,7 @@ export function screens(state) {
     return regions;
   };
 
+  list.push({name: "Login", regions: login(state)});
   for (const p of hubPanes) {
     const ids = HUB_PANES[p.pane];
     const split = {layout: ids.length > 1 ? "split" : "single", ratio: 35, collapsible: false,
@@ -116,6 +123,18 @@ export function screens(state) {
     list.push({name: "Bell → drawer", regions});
   }
   return list;
+}
+
+// The login screen: the app's name and either the IdP's button or, in development, the initial users to pick from.
+function login(state) {
+  const idp = IDPS.find((i) => i.id === state.identity.idp.kind);
+  const lines = [state.identity.login.subtitle || state.app.description || "", ""];
+  if (idp.id === "none") {
+    lines.push("Sign in as (development):", ...state.identity.users.slice(0, 5).map((u) => `[ ${u.name} · ${u.roles.join(", ")} ]`));
+  } else {
+    lines.push(`[ Sign in with ${idp.name} ]`);
+  }
+  return [box(0, 0, W, H, "", "dim", []), box(W / 2 - 180, 90, 360, 300, state.identity.login.title || state.app.name, "app", lines)];
 }
 
 function box(x, y, w, h, text, kind, lines = []) {

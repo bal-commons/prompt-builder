@@ -1,14 +1,14 @@
 import {ASSISTANTS, componentSummary, DOCS, docUrl, FRAMEWORKS, IDPS, serviceById, SERVICES, VERSIONS, WORKFLOW_UI} from "./catalog.js";
-import {agentActivities, proxies, wfNames} from "./code.js";
+import {agentActivities, packageState, proxies, wfNames} from "./code.js";
 import {fieldName, startInputSchema} from "./contracts.js";
-import {component, enabledServices, identifier, pageComponents, usedComponents, usesManagementApi} from "./state.js";
+import {claimMap, devPassword, seedFile} from "./identity.js";
+import {component, enabledServices, identifier, integrationOf, integrationsOf, managedIntegrations, newIntegrations, pageComponents,
+  qualifiedTaskName, taskTypes, usedComponents, workflowsOf} from "./state.js";
 
 // Builds the prompts. Each part is a list of steps; the "full" style joins them into one prompt.
 export function prompts(state) {
   const parts = [frontend(state), backend(state)];
-  if (state.workflows.length) {
-    parts.push(workflows(state));
-  }
+  if (newIntegrations(state).some((i) => i.workflows.length)) parts.push(workflows(state));
   return parts.map((part) => state.style === "full" ? {...part, steps: [join(part)]} : part);
 }
 
@@ -23,40 +23,49 @@ const bullet = (items) => items.filter(Boolean).map((i) => `- ${i}`).join("\n");
 const services = (state) => enabledServices(state).map((id) => SERVICES.find((s) => s.id === id));
 const on = (state, id) => enabledServices(state).includes(id);
 const used = (state) => usedComponents(state).map((id) => component(state, id));
-const nameOf = (c) => c.tag ? `<${c.tag}>${c.start ? ` (${c.name})` : ""}` : c.name;
+const nameOf = (c) => c.tag ? `<${c.tag}>${c.start || c.taskType ? ` (${c.name})` : ""}` : c.name;
 const slug = (text) => identifier(text, "custom").replace(/_/g, "-");
-const agentsOf = (state) => state.workflows.filter((w) => w.kind === "agent");
-const flowsOf = (state) => state.workflows.filter((w) => w.kind === "workflow");
-const proxy = (state, path) => proxies(state).find(([p]) => p === path)?.[0] ?? path;
+const roles = (state) => state.identity.roles;
+const admins = (state) => state.identity.adminRoles;
+const idpOf = (state) => IDPS.find((i) => i.id === state.identity.idp.kind);
+const taskKey = qualifiedTaskName;
 
 // The JSON Schema a start form renders (shared with the preview).
 export const inputSchema = startInputSchema;
 
-function describeWorkflow(wf) {
-  const w = wfNames(wf);
-  const input = wf.input.map((f) => `${fieldName(f)} (${f.type}${f.required ? "" : ", optional"})`).join(", ") || "nothing";
-  if (wf.kind === "agent") {
-    return `${w.display}: a durable agent. \`POST /api/start/${w.path}\` with ${input} spawns one for the caller${wf.chat ? `; it opens a chat between the caller and the agent, which takes part as participant \`${w.agentId}\`` : ""}.`;
-  }
-  const tasks = (wf.tasks ?? []).map((t) => `"${t.title || t.name}" for ${t.roles.join(", ") || "anyone"}`).join(", then ");
-  return `${w.display}: a workflow. \`POST /api/start/${w.path}\` with ${input} starts it; it waits for ${tasks || "no human task"}.`;
+// Where the portal reaches an integration, through its development proxy.
+export const appPath = (int) => `/api/${int.pkg}/app`;
+export const startPath = (int) => `/api/${int.pkg}/start`;
+export const mgmtPath = (int) => `/api/${int.pkg}/workflow`;
+
+function describeIntegration(state, int) {
+  const items = int.workflows.map((wf) => {
+    const w = wfNames(wf);
+    const input = wf.input.map((f) => `${fieldName(f)} (${f.type}${f.required ? "" : ", optional"})`).join(", ") || "nothing";
+    if (wf.kind === "agent") {
+      return `${w.display}: a durable agent${int.source === "new" ? `, started with \`POST ${startPath(int)}/${w.path}\` (${input})${wf.chat ? `; it opens a chat in which the agent takes part as \`${w.agentId}\`` : ""}` : ""}.`;
+    }
+    const tasks = (wf.tasks ?? []).map((t) => `"${t.title || t.name}" (\`${taskKey(wf, t)}\`) for ${t.roles.join(", ") || "anyone"}`).join(", then ");
+    return `${w.display}: a workflow${int.source === "new" ? `, started with \`POST ${startPath(int)}/${w.path}\` (${input})` : `, started through its management API (\`workflowType: "${wf.fixedName ?? wf.name}"\`)`}; it waits for ${tasks || "no human task"}.`;
+  });
+  return `${int.title} (${int.source === "new" ? `new Ballerina package \`${int.org}/${int.pkg}\`` : `existing integration \`${int.org}/${int.pkg}\`${int.version ? ` ${int.version}` : ""}, imported from its workflow.def.json`}):
+${bullet(items)}`;
 }
 
 function context(state) {
-  const idp = IDPS.find((i) => i.id === state.idp.kind);
+  const idp = idpOf(state);
   const list = services(state);
+  const ints = integrationsOf(state).filter((i) => i.workflows.length || i.source === "new");
   return `App: ${state.app.name}.${state.app.description ? ` ${state.app.description}` : ""}
-Roles: ${state.app.roles.join(", ")}${state.app.adminRoles.length ? `; ${state.app.adminRoles.join(", ")} see everyone's runs` : ""}.
-${state.workflows.length ? `Workflows and agents (Ballerina workflow ${VERSIONS.workflow}); each start is a run with an ID like ${(state.app.idPrefix || "RUN").toUpperCase()}-1001:
-${bullet(state.workflows.map(describeWorkflow))}` : "No workflows or agents yet."}${list.length ? `
-Commons services (Ballerina Central org \`commons\`, version ${VERSIONS.commons}), all running in the backend process:
-${bullet(list.map((s) => `${s.name}: \`${s.module}\`, port ${s.port}, base path ${s.basePath}. ${s.summary}`))}` : ""}${usesManagementApi(state) ? `
-Human tasks and approvals come from the workflow app's management API (port 8234, \`/workflow\`).` : ""}
-${behaviorLines(state)}Sign-in: ${idp.id === "none" ? "none yet (development headers)" : `${idp.name} (OIDC)`}.${list.length ? `
-Correlation rule: a run's ID is the \`correlationId\` of every conversation, upload case and notification about it.` : ""}`;
+Identity: ${idp.id === "none" ? "no identity provider yet (development headers)" : `${idp.name} (OIDC); user ID in \`${state.identity.idp.userIdClaim}\`, roles in \`${state.identity.idp.rolesClaim}\``}. Roles: ${roles(state).join(", ")}${admins(state).length ? ` (${admins(state).join(", ")} can see everyone's runs)` : ""}. Initial users: ${state.identity.users.map((u) => `${u.username} (${u.roles.join(", ") || "no role"})`).join(", ")}.
+Integrations (Ballerina workflow ${VERSIONS.workflow}); each start is a run with an ID like RUN-1001:
+${ints.map((i) => describeIntegration(state, i)).join("\n")}${list.length ? `
+Shared commons services (Ballerina Central org \`commons\`, version ${VERSIONS.commons}), in their own package (\`backend/commons\`):
+${bullet(list.map((s) => `${s.name}: \`${s.module}\`, port ${s.port}, base path ${s.basePath}. ${s.summary}`))}` : ""}${managedIntegrations(state).length ? `
+Human tasks and approvals come from each integration's workflow management API (\`/workflow\`).` : ""}
+${behaviorLines(state)}${list.length ? "Correlation rule: a run's ID is the `correlationId` of every conversation, upload case and notification about it." : ""}`;
 }
 
-// The behavior the design configured, as context lines.
 function behaviorLines(state) {
   const lines = [];
   if (state.capabilities?.uploads) {
@@ -64,7 +73,7 @@ function behaviorLines(state) {
   }
   const events = state.capabilities?.notifications ? Object.entries(state.behavior.notifications.events).filter(([, v]) => v).map(([k]) =>
     ({runStarted: "a run starts (its starter)", taskAssigned: "a task is assigned (its reviewer roles)", runFinished: "a run finishes (its starter)"})[k]) : [];
-  if (events.length) lines.push(`The backend sends notifications when ${events.join(", when ")}.`);
+  if (events.length) lines.push(`The integrations send notifications when ${events.join(", when ")}.`);
   return lines.length ? lines.join("\n") + "\n" : "";
 }
 
@@ -74,7 +83,7 @@ const packageOf = (c) => c.service === "workflow" || c.service === "workflow-sta
 
 function frontend(state) {
   const fw = FRAMEWORKS.find((f) => f.id === state.frontend.framework);
-  const idp = IDPS.find((i) => i.id === state.idp.kind);
+  const idp = idpOf(state);
   const plain = fw.id === "plain";
   const hub = state.layout.shell === "hub";
   const all = used(state);
@@ -94,8 +103,7 @@ The ready-made UI comes from the bal-commons Web Components (Lit, Apache-2.0). T
 git clone https://github.com/bal-commons/module-commons-service-commons && (cd module-commons-service-commons/ui && npm install && npm run build)
 ${repos.map((r) => {
   const dir = r.split("/").pop();
-  const atRoot = dir === "commons-workflow-ui";
-  return `git clone ${r} && (cd ${dir}${atRoot ? "" : "/ui"} && npm install && npm run build)`;
+  return `git clone ${r} && (cd ${dir}${dir === "commons-workflow-ui" ? "" : "/ui"} && npm install && npm run build)`;
 }).join("\n")}${hub ? `
 git clone ${DOCS.hubRepo} && (cd commons-hub-ui && npm install && npm run build)` : ""}
 \`\`\`
@@ -104,25 +112,26 @@ ${plain
   : `Use \`npm link\` in each package directory, then \`npm link ${packages.join(" ")}\` in \`frontend/\`. Import each package once at startup to register its elements. Once published, \`npm install ${packages.join(" ")}\` replaces the links.`}
 Read the components guide first: ${DOCS.guide}
 ` : ""}
-In development, proxy these paths to the backend${packaged.length ? " (some components keep a server-sent events stream open, so the proxy must not buffer)" : ""}:
+In development, proxy these paths to the backends${packaged.length ? " (some components keep a server-sent events stream open, so the proxy must not buffer)" : ""}:
 ${bullet(proxies(state).map(([a, , b]) => `\`${a}\` → \`${b}\``))}`,
-    check: `the dev server starts${packaged.length ? ", the component packages load without console errors" : ""}, and \`/api/app/runs\` answers through the proxy.`
+    check: `the dev server starts${packaged.length ? ", the component packages load without console errors" : ""}, and each proxy path answers.`
   });
 
   steps.push({
-    title: "Sign-in",
-    body: idp.id === "none"
-      ? `There is no identity provider yet. Add a persona switcher${state.header.includes("user-menu") ? " in the user menu" : " in the header"} with one user per role (${state.app.roles.join(", ")})${packaged.length ? ", and call `configureAuth(devUser(userId, roles))` from any bal-commons package at startup" : ""}. Send the identity to the app API and the start service as \`x-user-id\` and \`x-user-roles\` headers. Keep all of this in one \`auth\` module so it can be swapped for OIDC later.`
-      : `Sign users in with ${idp.name} using the OIDC authorization code flow with PKCE (a public client: no client secret in the browser).
+    title: "The login screen and sign-in",
+    body: `The first screen is the login screen: the app's name${state.identity.login.title ? ` ("${state.identity.login.title}")` : ""}${state.identity.login.subtitle ? `, "${state.identity.login.subtitle}"` : ""}, and ${idp.id === "none"
+      ? `a list of the initial users to sign in as (development only): ${state.identity.users.map((u) => `${u.name} (${u.roles.join(", ")})`).join(", ")}. Signing in as one calls \`configureAuth(devUser(username, roles))\` and sends \`x-user-id\` / \`x-user-roles\` to every backend. Keep this in one \`auth\` module so OIDC can replace it.`
+      : `a "Sign in with ${idp.name}" button. Use the OIDC authorization code flow with PKCE (a public client: no client secret in the browser):
 ${bullet([
-  `Client ID \`${state.idp.clientId}\`, authorize \`${state.idp.authorizeUrl}\`, token \`${state.idp.tokenUrl}\`, scopes \`${state.idp.scopes}\`, redirect URI \`http://localhost:5173/callback\`.`,
+  `Client ID \`${state.identity.idp.clientId}\`, authorize \`${state.identity.idp.authorizeUrl}\`, token \`${state.identity.idp.tokenUrl}\`, scopes \`${state.identity.idp.scopes}\`, redirect URI \`http://localhost:5173/callback\`.`,
   plain ? "Write the PKCE flow by hand (about 60 lines: code verifier, S256 challenge, redirect, code exchange). No library." : "Use `oidc-client-ts` (Apache-2.0) for the flow.",
-  `Keep the access token in sessionStorage. Read the user ID from the \`${state.idp.userIdClaim}\` claim and roles from \`${state.idp.rolesClaim}\`, only to shape the UI: the services check the token themselves.`,
-  packaged.length ? "Call `configureAuth(bearer(() => token, () => signIn()))` once at startup, so every component sends the token and a 401 starts sign-in again." : "",
-  "Send the same `Authorization: Bearer` header to the app API and the start service.",
+  `Keep the access token in sessionStorage. Read the user ID from \`${state.identity.idp.userIdClaim}\` and the roles from \`${state.identity.idp.rolesClaim}\` only to shape the UI; every backend checks the token itself.`,
+  packaged.length ? "Call `configureAuth(bearer(() => token, () => signIn()))` once, so every component sends the token and a 401 starts sign-in again." : "",
+  "Send the same `Authorization: Bearer` header to every integration's app, start and management paths.",
   idp.defaults.selfSigned ? `${idp.name} uses a self-signed certificate in development: proxy the token endpoint through the dev server.` : ""
-])}`,
-    check: `you can sign in as a user of each role (${state.app.roles.join(", ")}).`
+])}`}
+After sign-in, show the portal; Sign out returns to the login screen.`,
+    check: `you can sign in as ${state.identity.users.map((u) => u.username).join(", ")}${idp.id !== "none" ? ` (passwords from the identity seed file, e.g. \`${devPassword(state.identity.users[0] ?? {username: "user"})}\`)` : ""}, and each sees the portal.`
   });
 
   steps.push({title: "Layout and navigation", body: layoutText(state),
@@ -148,7 +157,7 @@ Reference: ${c.service === "workflow-start" ? WORKFLOW_UI.docs("workflow-start-f
 
 ### <commons-hub>
 Reference: ${DOCS.hub}` : ""}`,
-      check: `a start form starts its workflow or agent${agentsOf(state).some((a) => a.chat) ? ", and a chat agent's conversation opens with its first message" : ""}${usesManagementApi(state) ? ", and a task completed in the task form leaves the inbox" : ""}.`
+      check: `each start form starts its workflow or agent${workflowsOf(state).some((a) => a.chat) ? ", a chat agent's conversation opens with its greeting" : ""}${managedIntegrations(state).length ? ", and a task completed in the task form leaves the inbox" : ""}.`
     });
   }
 
@@ -156,21 +165,14 @@ Reference: ${DOCS.hub}` : ""}`,
   if (own.length) {
     steps.push({
       title: "The app's own components",
-      body: `The app API (Ballerina, behind \`/api/app\`):
-${bullet([
-  "`GET /api/app/runs` lists the runs the caller started (everyone's for " + (state.app.adminRoles.join(", ") || "admin roles") + "): `id`, `workflow`, `title`, `status`, `conversationId`, `instanceId`, `createdAt`.",
-  "`GET /api/app/runs/{id}` returns one.",
-  ...state.custom.filter((c) => c.api && usedComponents(state).includes(c.id)).map((c) => `\`GET /api/app/${slug(c.name)}\` serves ${c.name} (the backend prompt adds it).`)
-])}
-
-${own.map((c) => `### ${c.name}\n${APP_NOTES[c.id] ? APP_NOTES[c.id](state) : customNote(c)}`).join("\n\n")}`,
-      check: "the app's own components show live data from the app API."
+      body: `${own.map((c) => `### ${c.name}\n${APP_NOTES[c.id] ? APP_NOTES[c.id](state) : customNote(state, c)}`).join("\n\n")}`,
+      check: "the app's own components show live data from the integrations."
     });
   }
 
   steps.push({
     title: "Look and feel",
-    body: `${packaged.length ? "Match the app's design through the components' CSS custom properties on `:root` (`--bc-accent`, `--bc-font`, `--bc-radius`, `--bc-bg`, `--bc-surface`, `--bc-border`, …) and their `::part()`s; don't restyle their internals. " : ""}Use one set of design tokens for the app's own components too. Keep dark mode (\`prefers-color-scheme\`) and keyboard access. No horizontal scroll at 390px.`,
+    body: `${packaged.length ? "Match the app's design through the components' CSS custom properties on `:root` (`--bc-accent`, `--bc-font`, `--bc-radius`, `--bc-bg`, `--bc-surface`, `--bc-border`, …) and their `::part()`s; don't restyle their internals. " : ""}Use one set of design tokens for the login screen and the app's own components too. Keep dark mode (\`prefers-color-scheme\`) and keyboard access. No horizontal scroll at 390px.`,
     check: "the pages look consistent in light and dark mode, and there are no console errors while you use every page."
   });
 
@@ -178,7 +180,7 @@ ${own.map((c) => `### ${c.name}\n${APP_NOTES[c.id] ? APP_NOTES[c.id](state) : cu
     id: "frontend",
     title: "Frontend",
     assistant: ASSISTANTS.claude.name,
-    intro: `You are building the web frontend of a new app. Work in \`frontend/\`; the Ballerina backend is built separately (it runs on localhost).
+    intro: `You are building the web portal of an app ecosystem. Work in \`frontend/\`; the backends (Ballerina integrations and shared commons services) are built separately and run on localhost.
 
 ${context(state)}
 
@@ -202,7 +204,7 @@ function layoutText(state) {
   const shell = state.layout.shell;
   if (shell === "hub") {
     const panes = state.layout.hubPanes;
-    return `The app is one \`<commons-hub>\` (${DOCS.hub}) filling the viewport, with \`panes="${panes.join(" ")}"\` and the URLs of the services those panes use, \`me\` set to the signed-in user ID and \`routing="hash"\`${state.app.adminRoles.length && panes.includes("files") ? `; set \`admin\` for ${state.app.adminRoles.join(", ")}` : ""}. Put the app's name in \`slot="brand"\`${state.header.includes("user-menu") ? " and the user menu in `slot=\"nav-end\"`" : ""}.
+    return `The app is one \`<commons-hub>\` (${DOCS.hub}) filling the viewport, with \`panes="${panes.join(" ")}"\` and the URLs of the services those panes use, \`me\` set to the signed-in user ID and \`routing="hash"\`${admins(state).length && panes.includes("files") ? `; set \`admin\` for ${admins(state).join(", ")}` : ""}. Put the app's name in \`slot="brand"\`${state.header.includes("user-menu") ? " and the user menu in `slot=\"nav-end\"`" : ""}.
 The app's own pages are extra panes: ${state.pages.map((p) => `\`<section pane="${p.id}" label="${p.title}">\``).join(", ")}; lay each out as the next step describes.`;
   }
   const nav = shell === "sidebar"
@@ -223,13 +225,14 @@ function pageText(state, page) {
 - Right: ${list(cols[1])}`;
   const ids = cols.flat();
   const has = (id) => ids.includes(id);
+  const inbox = ids.some((id) => id === "task-inbox" || id.startsWith("task-inbox@"));
   const starts = ids.filter((id) => id.startsWith("start:"));
   const rules = [];
   if (starts.length && has("conversation")) rules.push("After a start form starts a chat agent, show its conversation (`detail.response.conversationId` of `workflow-started`).");
   if (starts.length && has("runs")) rules.push("After a start form starts something, refresh My runs and select the new run.");
   if (has("runs") && has("conversation")) rules.push("Selecting a run shows its conversation (`conversationId`); a run without one shows its status instead.");
-  if (has("runs") && has("task-inbox")) rules.push("Selecting a run narrows the task inbox to its tasks (`instance-id` = the run's `instanceId`); clearing the selection shows all.");
-  if (has("task-inbox") && has("task-form")) rules.push("Selecting a task in the inbox opens it in the task form (`kind` and `task-id` from `detail.task`).");
+  if (has("runs") && inbox) rules.push("Selecting a run narrows the task inbox to its tasks (`instance-id` = the run's `instanceId`); clearing the selection shows all.");
+  if (inbox && has("task-form")) rules.push("Selecting a task in an inbox opens it in the task form: `kind` and `task-id` from `detail.task`, and `base-url` = the management API of the inbox it came from.");
   if (has("conversation-list") && has("conversation")) rules.push("Selecting a conversation in the list shows it in the conversation.");
   if (has("case-list") && has("file-viewer") && has("upload-case")) rules.push("Selecting a case shows it: the upload card while it is OPEN and the user is one of its subjects, otherwise the file viewer.");
   else if (has("case-list") && (has("file-viewer") || has("upload-case"))) rules.push(`Selecting a case shows it in the ${has("file-viewer") ? "file viewer" : "upload card"}.`);
@@ -237,28 +240,43 @@ function pageText(state, page) {
 ${layout}${rules.length ? "\n" + bullet(rules) : ""}`;
 }
 
-function customNote(c) {
-  return `Build it: ${c.description || "(no description yet)"}${c.api ? ` It reads \`/api/app/${slug(c.name)}\`.` : " Frontend only."}`;
+function customNote(state, c) {
+  const int = newIntegrations(state)[0];
+  return `Build it: ${c.description || "(no description yet)"}${c.api && int ? ` It reads \`${appPath(int)}/${slug(c.name)}\`.` : " Frontend only."}`;
 }
 
 const APP_NOTES = {
-  "runs": (state) => `The caller's runs from \`GET /api/app/runs\`, newest first: title, which workflow or agent, status and age. Refresh after a start and every 15 seconds while the page is visible${state.workflows.length ? "" : " (there are no workflows yet)"}.`,
-  "user-menu": (state) => `The signed-in user's name and roles${state.idp.kind === "none" ? ", the persona switcher" : ""}, and Sign out.`
+  "runs": (state) => `The caller's runs from every integration, merged and newest first: ${newIntegrations(state).map((i) => `\`GET ${appPath(i)}/runs\``).join(", ") || "(no new integration)"}. Each item has \`id\`, \`workflow\`, \`title\`, \`status\`, \`conversationId\`, \`instanceId\`, \`createdAt\`; show title, which workflow or agent, status and age. Refresh after a start and every 15 seconds while the page is visible.`,
+  "user-menu": (state) => `The signed-in user's name and roles${state.identity.idp.kind === "none" ? ", switching user (back to the login screen)" : ""}, and Sign out.`
 };
 
 function noteFor(state, c) {
   if (c.start) {
-    const wf = state.workflows.find((w) => w.id === c.start);
-    return `\`action\` = \`${proxy(state, "/api/start")}/${wfNames(wf).path}\`; set its \`schema\` property to this JSON Schema (the start input):
-\`\`\`json
+    const wf = workflowsOf(state).find((w) => w.id === c.start);
+    const int = integrationOf(state, wf.id);
+    const schema = `\`\`\`json
 ${JSON.stringify(inputSchema(wf.input), null, 2)}
-\`\`\`
-It posts the values as JSON and fires \`workflow-started\` with \`detail.response\` = \`{runId, instanceId, conversationId}\`.`;
+\`\`\``;
+    return int.source === "new"
+      ? `\`action\` = \`${startPath(int)}/${wfNames(wf).path}\`; set its \`schema\` property to this JSON Schema (the start input):
+${schema}
+It posts the values as JSON and fires \`workflow-started\` with \`detail.response\` = \`{runId, instanceId, conversationId}\`.`
+      : `${int.title} is an existing integration: start it through its management API. \`action\` = \`${mgmtPath(int)}/workflows\`, \`workflow-type\` = \`${wf.fixedName ?? wf.name}\`, and \`schema\`:
+${schema}
+The form posts \`{workflowType, input}\`; \`detail.response\` is \`{workflowId, runId}\`.`;
   }
-  const mgmt = proxy(state, "/api/workflow");
+  const managed = managedIntegrations(state);
+  if (c.taskType) {
+    const type = taskTypes(state).find((t) => t.ref === c.taskType);
+    return `\`base-url\` = \`${mgmtPath(type.integration)}\` and \`task-name\` = \`${taskKey(type.workflow, type.task)}\`: only "${type.task.title || type.task.name}" tasks. On \`workflow-task-select\`, open \`detail.task\` in the task form with the same base URL.`;
+  }
   switch (c.tag) {
-    case "workflow-task-inbox": return `\`base-url\` = \`${mgmt}\`. It lists the caller's human tasks and approvals (the work assigned to them) and polls. On \`workflow-task-select\`, open \`detail.task\` in the task form. Title it "Tasks" or "My tasks", not "Inbox", so it isn't confused with the notification inbox.`;
-    case "workflow-task-form": return `\`base-url\` = \`${mgmt}\`, and \`kind\` + \`task-id\` from the inbox's selection. A human task shows its context and a form generated from its answer type; an approval shows the proposed action with Approve / Edit and approve / Reject. It shows success only after the management API accepts the decision, reports a task someone else already completed (409), and the inbox refreshes by itself.`;
+    case "workflow-task-inbox":
+      return managed.length > 1
+        ? `The tasks come from ${managed.length} integrations: show one \`<workflow-task-inbox>\` per integration, stacked, each with its heading: ${managed.map((i) => `${i.title} (\`base-url\` = \`${mgmtPath(i)}\`)`).join(", ")}. On \`workflow-task-select\`, open \`detail.task\` in the task form with that inbox's base URL. Title the section "Tasks", not "Inbox", so it isn't confused with the notification inbox.`
+        : `\`base-url\` = \`${managed[0] ? mgmtPath(managed[0]) : "/api/<integration>/workflow"}\`. It lists the caller's human tasks and approvals (the work assigned to them) and polls. On \`workflow-task-select\`, open \`detail.task\` in the task form. Title it "Tasks", not "Inbox", so it isn't confused with the notification inbox.`;
+    case "workflow-task-form":
+      return "`base-url` = the management API of the inbox the task came from, and `kind` + `task-id` from the selection. A human task shows its context and a form generated from its answer type; an approval shows the proposed action with Approve / Edit and approve / Reject. It shows success only after the management API accepts the decision, reports a task someone else already completed (409), and the inbox refreshes by itself.";
   }
   return COMPONENT_NOTES[c.tag]?.(state) ?? componentSummary(c);
 }
@@ -269,93 +287,82 @@ const COMPONENT_NOTES = {
   "commons-conversation-list": () => "`base-url` = `/api/chat`, property `me` = the user ID, add `searchable`. On `commons-conversation-select`, show `event.detail.conversation.id` in the conversation.",
   "commons-conversation": (state) => `\`base-url\` = \`/api/chat\`, \`conversation-id\`, property \`me\` = the user ID${on(state, "attachment") ? ", and `attachments-url` = `/api/attachments` so an agent's upload requests render as upload cards in the chat" : ""}. It renders streamed agent replies, forms and typing itself; give it a fixed height.`,
   "commons-upload-case": () => "`base-url` = `/api/attachments`, `case-id`, property `me` = the user ID (others see it read-only).",
-  "commons-case-list": (state) => `\`base-url\` = \`/api/attachments\`, property \`me\`${state.app.adminRoles.length ? `; set \`admin\` for ${state.app.adminRoles.join(", ")}` : ""}. On \`commons-case-select\`, show \`event.detail.case\`.`,
-  "commons-file-viewer": (state) => `\`base-url\` = \`/api/attachments\`, \`case-id\`, property \`me\`${state.app.adminRoles.length ? `; set \`can-delete\` for ${state.app.adminRoles.join(", ")}` : ""}.`
+  "commons-case-list": (state) => `\`base-url\` = \`/api/attachments\`, property \`me\`${admins(state).length ? `; set \`admin\` for ${admins(state).join(", ")}` : ""}. On \`commons-case-select\`, show \`event.detail.case\`.`,
+  "commons-file-viewer": (state) => `\`base-url\` = \`/api/attachments\`, \`case-id\`, property \`me\`${admins(state).length ? `; set \`can-delete\` for ${admins(state).join(", ")}` : ""}.`
 };
 
 // ---------------------------------------------------------------- backend
 
 function backend(state) {
-  const idp = IDPS.find((i) => i.id === state.idp.kind);
+  const idp = idpOf(state);
   const copilot = state.assistants.backend === "copilot";
   const steps = [];
-  const chatAgents = agentsOf(state).filter((a) => a.chat && on(state, "chat"));
+  const seed = seedFile(state);
+  const ints = newIntegrations(state);
 
   steps.push({
-    title: "Start from the generated project",
-    body: `The builder generated a Ballerina ${VERSIONS.ballerina} package in \`backend/\` (download the starter): main.bal starts ${[...services(state).map((s) => s.name.toLowerCase()), usesManagementApi(state) && "the workflow management API"].filter(Boolean).join(", ") || "the app"} in this process; config.bal; types.bal; clients.bal; store.bal (the runs table); app.bal (\`/app/runs\`)${state.workflows.length ? "; start.bal (the start service); agents.bal / workflows.bal / activities.bal / hooks.bal (see the workflows prompt)" : ""}; Config.toml.
-${copilot
-  ? "Open `backend/` in VS Code with the Ballerina extension (WSO2 Integrator). Build it before you change anything."
-  : "Read every generated file, then build it before changing anything. The commons and workflow packages' sources are under `~/.ballerina/repositories/central.ballerina.io/bala/` after the first build; read the definitions there instead of guessing APIs."}
-\`\`\`sh
-cd backend && bal build
-\`\`\`
-Rules for this package:
-${bullet([
-  "Every `transaction` block must go through `commons/service_commons.db:atomic`. Ballerina starts one transaction coordinator per package, and the commons services already use it.",
-  "Keep secrets (API key, webhook secret, link secret, DB password) out of source control.",
-  "The app calls the commons services with the service-account headers in clients.bal; users call them from the browser with their own token.",
-  "Correlation: a run's ID is the correlationId of everything about it."
-])}`,
-    check: "`bal build` succeeds with no errors."
-  });
-
-  steps.push({
-    title: idp.id === "none" ? "Development identity" : `Sign-in with ${idp.name}`,
+    title: idp.id === "none" ? "Development identity" : `The identity provider: ${idp.name}`,
     body: idp.id === "none"
-      ? `No identity provider: the app and every service run with both auth schemes off, so they trust \`x-user-id\` / \`x-user-roles\` headers${usesManagementApi(state) ? " (the management API too, with `enableBasicAuth = false`)" : ""}. Development only; add an OIDC provider before anyone else uses the app.`
-      : `Configure every \`auth\` section in Config.toml the same way: \`enableJwtAuth = true\`, \`jwtIssuer = "${state.idp.issuer}"\`, \`jwksUrl = "${state.idp.jwksUrl}"\`, \`userIdClaim = "${state.idp.userIdClaim}"\`, \`rolesClaim = "${state.idp.rolesClaim}"\`${idp.defaults.selfSigned ? ", `jwksVerifyTls = false` (development certificate)" : ""}, and \`enableApiKey = true\` with a strong \`apiKeyValue\` equal to \`serviceApiKey\`.${usesManagementApi(state) ? " The management API needs `jwtAudience` too: the `aud` claim of the access tokens." : ""}
-Set up ${idp.name} (${idp.url}, ${idp.license}):
-${bullet(idp.setup)}
-Create users for each role (${state.app.roles.join(", ")}) and check a token has the claims.`,
-    check: idp.id === "none" ? "`curl -H 'x-user-id: alice' localhost:9090/app/runs` returns `[]`." : "`curl -H \"Authorization: Bearer $TOKEN\" localhost:9090/app/runs` returns `[]`, and without the header 401."
+      ? `No identity provider: every backend runs with both auth schemes off, so it trusts the \`x-user-id\` / \`x-user-roles\` headers the portal sends for the signed-in user${managedIntegrations(state).length ? " (the management APIs too, with `enableBasicAuth = false`)" : ""}. Development only; choose an OIDC provider before anyone else uses the app.`
+      : `${seed ? `Load the generated seed file \`${seed[0]}\`: it has the roles (${roles(state).join(", ")}), the initial users (${state.identity.users.map((u) => u.username).join(", ")}, with development passwords like \`${devPassword(state.identity.users[0] ?? {username: "user"})}\`), the portal client (\`${state.identity.idp.clientId}\`, public, PKCE, redirect \`http://localhost:5173/callback\`) and the claims below. ${idp.id === "keycloak" ? "Keycloak imports it with `start-dev --import-realm` from `/opt/keycloak/data/import/`." : "Thunder loads it at startup: `./start.sh <file>`."}` : `Set up ${idp.name} (${idp.url}, ${idp.license}):\n${bullet(idp.setup)}\nCreate the roles ${roles(state).join(", ")} and the users ${state.identity.users.map((u) => `${u.username} (${u.roles.join(", ")})`).join(", ")}.`}
+Every backend reads the same claims:
+${bullet(claimMap(state).map((c) => `${c.backend}: ${c.settings}`))}
+Each has \`enableJwtAuth = true\`, \`jwtIssuer = "${state.identity.idp.issuer}"\` and \`jwksUrl = "${state.identity.idp.jwksUrl}"\`${idp.defaults.selfSigned ? " (and `jwksVerifyTls = false` for the development certificate)" : ""}; the generated Config.toml files already say so.`,
+    check: idp.id === "none" ? "`curl -H 'x-user-id: alex' <an integration>/app/runs` returns `[]`." : `you can sign in as ${state.identity.users[0]?.username ?? "a user"} and the access token carries \`${state.identity.idp.userIdClaim}\` and \`${state.identity.idp.rolesClaim}\`.`
   });
 
-  if (state.workflows.length) {
+  if (services(state).length) {
     steps.push({
-      title: "The start service",
-      body: `start.bal has one resource per workflow and agent on \`/start\`:
-${bullet(state.workflows.map((wf) => {
+      title: "The commons services",
+      body: `\`backend/commons\` runs the shared ${services(state).map((s) => s.name.toLowerCase()).join(", ")} in one process (ports ${services(state).map((s) => s.port).join(", ")}). Its Config.toml sets their auth (the same claims), their database, CORS for the portal${services(state).some((s) => s.id === "chat" || s.id === "attachment") ? ", and the webhooks: each agent's participant ID and the `/hooks` URL of its integration" : ""}. \`apiKeyValue\` must equal every integration's \`serviceApiKey\`${services(state).some((s) => s.id === "chat" || s.id === "attachment") ? ", and each webhook `secret` its integration's `webhookSecret`" : ""}.
+\`\`\`sh
+cd backend/commons && bal build && bal run
+\`\`\`
+Every \`transaction\` block in any package that embeds commons code must go through \`commons/service_commons.db:atomic\` (one transaction coordinator per package).`,
+      check: `each service answers on its port, e.g. \`curl localhost:${services(state)[0].port}${services(state)[0].basePath}/stream-ticket -X POST -H 'x-user-id: alex'\`.`
+    });
+  }
+
+  for (const int of ints) {
+    const p = packageState(state, int);
+    steps.push({
+      title: `Integration: ${int.title}`,
+      body: `\`backend/${int.pkg}\` is the Ballerina ${VERSIONS.ballerina} package \`${int.org}/${int.pkg}\`: its app API on :${p.ports.app} (\`/app/runs\`${int.workflows.length ? ", `/start/<name>`" : ""})${p.mgmt ? `, its workflow management API on :${p.ports.mgmt}` : ""}${p.services.length ? `, and clients of the commons ${p.services.join(", ")} service${p.services.length > 1 ? "s" : ""} (URLs in Config.toml)` : ""}.
+${copilot ? "Open it in VS Code with the Ballerina extension (WSO2 Integrator) and build it before you change anything." : "Read every generated file, then build it before changing anything. The commons and workflow packages' sources are under `~/.ballerina/repositories/central.ballerina.io/bala/` after the first build; read the definitions there instead of guessing APIs."}
+\`\`\`sh
+cd backend/${int.pkg} && bal build
+\`\`\`
+${int.workflows.length ? `The start service (start.bal) has one resource per workflow and agent:
+${bullet(int.workflows.map((wf) => {
   const w = wfNames(wf);
-  const chat = chatAgents.includes(wf);
-  return `\`POST /start/${w.path}\` takes \`${w.input}\`, takes the next run ID, ${chat ? `opens a conversation (correlationId = the run ID) between the caller and \`${w.agentId}\` (the agent's own identity in the chat), ` : ""}${wf.kind === "agent" ? `spawns \`${w.agentVar}\`` : `starts the \`${w.fn}\` workflow`} with the input plus \`runId\` and \`startedBy\`, records the run and returns \`{runId, instanceId, conversationId}\`.`;
+  return `\`POST /start/${w.path}\` takes \`${w.input}\`, takes the next run ID, ${wf.kind === "agent" && wf.chat && p.services.includes("chat") ? `opens a conversation (correlationId = the run ID) with \`${w.agentId}\` as a participant, ` : ""}${wf.kind === "agent" ? `spawns \`${w.agentVar}\`` : `starts \`${w.fn}\``} with the input plus \`runId\` and \`startedBy\`, records the run and returns \`{runId, instanceId, conversationId}\`.`;
 }))}
-Add validation where the input needs it (answer with \`service_commons:badRequest\`), and anything the app must do before a run starts.`,
-      check: `\`POST /start/${wfNames(state.workflows[0]).path}\` returns 201 and \`GET /app/runs\` lists the run.`
-    });
-  }
-
-  const customApis = state.custom.filter((c) => c.api && usedComponents(state).includes(c.id));
-  if (customApis.length) {
-    steps.push({
-      title: "Endpoints for custom components",
-      body: `Add a resource to the \`/app\` service in app.bal for each, scoped to the caller like the others:
-${bullet(customApis.map((c) => `\`GET /app/${slug(c.name)}\` for ${c.name}: ${c.description || "(describe what it returns)"}`))}`,
-      check: "each endpoint answers with the caller's identity and rejects anonymous calls."
+Add input validation where it's needed (\`service_commons:badRequest\`).` : "It has no workflows yet."}${int === ints[0] ? customEndpoints(state) : ""}`,
+      check: `\`bal build\` succeeds, and ${int.workflows.length ? `\`POST localhost:${p.ports.app}/start/${wfNames(int.workflows[0]).path}\` returns 201` : `\`GET localhost:${p.ports.app}/app/runs\` returns \`[]\``}.`
     });
   }
 
   steps.push({
-    title: "Database",
+    title: "Databases",
     body: state.db === "h2"
-      ? "H2 files under `target/data/` work with no setup. The app and every service share one database, each with its own table prefix."
-      : `Use ${state.db === "postgresql" ? "PostgreSQL" : "MySQL"}: every \`db\` section in Config.toml has \`dbType\`, \`url\`, \`user\` and \`password\`; the tables are created on start. Create the database and user first.`,
-    check: "the backend starts and logs its applied migrations."
+      ? "H2 files under each package's `target/data/` work with no setup: the commons package and every integration keep their own."
+      : `Use ${state.db === "postgresql" ? "PostgreSQL" : "MySQL"}: every \`db\` section has \`dbType\`, \`url\`, \`user\` and \`password\`; give each package its own database (or schema) and create them first.`,
+    check: "every package starts and logs its applied migrations."
   });
 
   steps.push({
-    title: state.deploy === "compose" ? "Run it with Docker Compose" : "Run it locally",
+    title: state.deploy === "compose" ? "Run the ecosystem with Docker Compose" : "Run the ecosystem locally",
     body: state.deploy === "compose"
-      ? `Write \`backend/Dockerfile\` (build with \`bal build\` in a \`ballerina/ballerina:${VERSIONS.ballerina}\` stage, run on \`eclipse-temurin:21-jre\`) and use the generated docker-compose.yml and nginx.conf. Put secrets in \`.env\` (git-ignored) and render Config.toml from them at start, so the image holds none.`
-      : `Run \`bal run\` in \`backend/\`${state.workflows.length ? " with `temporal server start-dev` running" : ""}. Stop it with Ctrl+C rather than kill -9${state.workflows.length ? ": a killed worker can leave a Temporal poll that holds the next task for minutes" : ""}.`,
-    check: `the app answers on :9090${services(state).length ? ` and each service on its port (${services(state).map((s) => s.port).join(", ")})` : ""}${usesManagementApi(state) ? ", and the management API on :8234" : ""}.`
+      ? `Write a Dockerfile per package (build with \`bal build\` in a \`ballerina/ballerina:${VERSIONS.ballerina}\` stage, run on \`eclipse-temurin:21-jre\`) and use the generated docker-compose.yml (${[idp.id !== "none" && idp.name, services(state).length && "commons", ...ints.map((i) => i.pkg), "web"].filter(Boolean).join(", ")}) and nginx.conf. Secrets go in \`.env\` (git-ignored); render each Config.toml from them at start.`
+      : `Start ${[ints.some((i) => i.workflows.length) && "`temporal server start-dev`", idp.id !== "none" && idp.name, services(state).length && "`backend/commons`", ...ints.map((i) => `\`backend/${i.pkg}\``)].filter(Boolean).join(", then ")} (\`bal run\` in each package). Stop them with Ctrl+C rather than kill -9: a killed worker can leave a Temporal poll that holds the next task for minutes.`,
+    check: "the portal's proxy paths all answer."
   });
 
   return {
     id: "backend",
-    title: "Backend",
+    title: "Backends",
     assistant: ASSISTANTS[state.assistants.backend].name,
-    intro: `${copilot ? "Work in the Ballerina package in `backend/`. Make one change at a time and build after each." : "You are building the Ballerina backend of a new app, in `backend/`. Build after every change with `bal build`."}
+    intro: `${copilot ? "Work in the Ballerina packages in `backend/`. Make one change at a time and build after each." : "You are building the backends of an app ecosystem: Ballerina packages in `backend/`, one per integration plus the shared commons services. Build after every change with `bal build`."}
 
 ${context(state)}${copilot ? `
 
@@ -365,13 +372,21 @@ ${cheatSheet(state)}` : ""}`,
   };
 }
 
+function customEndpoints(state) {
+  const apis = state.custom.filter((c) => c.api && usedComponents(state).includes(c.id));
+  if (!apis.length) return "";
+  return `
+Custom components need endpoints on its \`/app\` service, scoped to the caller like the others:
+${bullet(apis.map((c) => `\`GET /app/${slug(c.name)}\` for ${c.name}: ${c.description || "(describe what it returns)"}`))}`;
+}
+
 function cheatSheet(state) {
   const lines = [];
   if (on(state, "notification")) lines.push("notification:Client `notifications`: `send({recipientType: USER|ROLE, recipientId, severity, title, body, correlationId, idempotencyKey})`.");
   if (on(state, "chat")) lines.push("chat:Client `chats`: `createConversation({correlationId, title, participants: [{participantId}, {participantType: chat:AGENT, participantId, displayName}]})`, `sendText(conversationId, text, senderId, id)`, `sendMessage(conversationId, {kind: chat:FORM|chat:ATTACHMENT_REF, content, senderId})`, `history(conversationId, afterSeq = n)`, `close(conversationId, reason, senderId)`.");
   if (on(state, "attachment")) lines.push("attachment:Client `attachments`: `createCase({idempotencyKey, correlationId, title, subjects, slots: [{name, label, mimeTypes, maxFiles}]})`, `close(caseId, reason)`.");
   lines.push("commons/service_commons.auth: `Authenticator`, `AuthInterceptor`, `callerOf(ctx)` gives `CallerIdentity {userId, roles, scopes}`.");
-  if (state.workflows.length) lines.push("ballerina/workflow: `workflow:run(workflowFunction, input)` returns the instance ID; a durable agent's `run(query, input)` does the same.");
+  lines.push("ballerina/workflow: `workflow:run(workflowFunction, input)` returns the instance ID; a durable agent's `run(query, input)` does the same.");
   return bullet(lines);
 }
 
@@ -379,56 +394,57 @@ function cheatSheet(state) {
 
 function workflows(state) {
   const copilot = state.assistants.workflow === "copilot";
-  const agents = agentsOf(state);
-  const flows = flowsOf(state);
+  const ints = newIntegrations(state).filter((i) => i.workflows.length);
   const steps = [];
 
   steps.push({
     title: "Run them as generated",
     body: `Configure:
 ${bullet([
-  "Temporal: `temporal server start-dev` locally (`[ballerina.workflow] mode = \"LOCAL\"`, `url = \"localhost:7233\"`), or a cluster with `mode = \"SELF_HOSTED\"`.",
-  agents.length ? "The agents' model: the WSO2 default provider, `[ballerina.ai.wso2ProviderConfig]` with `serviceUrl` and `accessToken` in Config.toml (VS Code: Ballerina → Configure default model provider), or replace `ai:getDefaultModelProvider()` in agents.bal with a ballerinax/ai.* provider that supports tool calling." : "",
-  agents.some((a) => a.chat || a.uploads) ? "Webhooks: Config.toml registers each chat agent's participant ID with the chat service (and upload agents with the attachment service). `url` is this app's `/hooks/...` receiver and `secret` must equal `webhookSecret`. hooks.bal verifies each delivery, drops repeats, finds the run by correlationId and hands the event to that run's agent with `sendData(instanceId, \"chat\", event)`." : "",
-  usesManagementApi(state) ? "The management API (`[ballerina.workflow.management.rest]`, port 8234) serves the task inbox and task forms: human tasks from `ctx->awaitHumanTask` and approvals from `approvalPolicy`. It decides who may see and complete each task from its roles." : ""
+  "Temporal: `temporal server start-dev` locally (`[ballerina.workflow] mode = \"LOCAL\"`, `url = \"localhost:7233\"`), or a cluster with `mode = \"SELF_HOSTED\"`. The integrations share the namespace; each has its own task queue.",
+  ints.some((i) => i.workflows.some((w) => w.kind === "agent")) ? "The agents' model: the WSO2 default provider, `[ballerina.ai.wso2ProviderConfig]` with `serviceUrl` and `accessToken` in the integration's Config.toml (VS Code: Ballerina → Configure default model provider), or replace `ai:getDefaultModelProvider()` in agents.bal with a ballerinax/ai.* provider that supports tool calling." : "",
+  ints.some((i) => i.workflows.some((w) => w.chat || w.uploads)) ? "Webhooks: the commons package's Config.toml registers each chat agent's participant ID with the chat service (and upload agents with the attachment service), pointing at its integration's `/hooks`. hooks.bal verifies each delivery, drops repeats, finds the run by correlationId and hands the event to that run's agent with `sendData(instanceId, \"chat\", event)`." : "",
+  managedIntegrations(state).length ? "Each integration with human tasks or approvals serves its workflow management API (`[ballerina.workflow.management.rest]`); the task inbox and task form read it. It decides who may see and complete each task from the token's roles." : ""
 ])}`,
     check: "starting each one from its start form creates a run, and the Temporal UI (http://localhost:8233 with `temporal server start-dev`) shows it."
   });
 
-  for (const wf of agents) {
-    const w = wfNames(wf);
-    const acts = agentActivities(state, wf);
-    steps.push({
-      title: `Agent: ${w.display}`,
-      body: `\`${w.agentVar}\` in agents.bal is a \`workflow:DurableAgent\`: one instance per run, input \`${w.start}\`, one \`chat\` event (MULTI_EVENT)${wf.chat ? `, and a conversation in which it speaks as \`${w.agentId}\`` : ""}. Its activities (activities.bal): ${acts.map((a) => `\`${a.id}\``).join(", ") || "none yet"}.
+  for (const int of ints) {
+    const p = packageState(state, int);
+    for (const wf of int.workflows) {
+      const w = wfNames(wf);
+      if (wf.kind === "agent") {
+        const acts = agentActivities(p, wf);
+        steps.push({
+          title: `${int.title} · agent ${w.display}`,
+          body: `\`${w.agentVar}\` in \`backend/${int.pkg}/agents.bal\` is a \`workflow:DurableAgent\`: one instance per run, input \`${w.start}\`, one \`chat\` event (MULTI_EVENT)${wf.chat ? `, and a conversation in which it speaks as \`${w.agentId}\`` : ""}. Its activities: ${acts.map((a) => `\`${a.id}\``).join(", ") || "none yet"}.
 Its job: ${wf.purpose || "(describe it)"}${wf.chat && wf.greeting?.trim() ? `
 start.bal posts its greeting ("${wf.greeting.trim()}") as soon as the chat opens, and the instructions tell the agent not to greet again.` : ""}
-Rewrite its instructions for that job, keeping the generated rules (act only through tools, one message per person per turn, end a turn with exactly \`[done]\`, answer side questions in plain text). The process, one step per event kind (MESSAGE, FORM_ANSWER, UPLOAD, REMINDER), each naming its tools:
+Rewrite its instructions for that job, keeping the generated rules (act only through tools, one message per person per turn, end a turn with exactly \`[done]\`, answer side questions in plain text). The process, one step per event kind (MESSAGE, FORM_ANSWER, UPLOAD, REMINDER):
 ${wf.steps.filter(Boolean).map((s, i) => `${i + 1}. ${s}`).join("\n") || "(none yet)"}${wf.approval.on ? `
 \`${wf.approval.activity}\` has an \`approvalPolicy\`: each call waits for ${wf.approval.userRoles.join(" or ") || "a person"} to approve it in the task inbox; a rejection returns their reason to the agent.` : ""}`,
-      check: `a run of ${w.display} follows every step, and each turn ends without errors in the log.`
-    });
-  }
-
-  for (const wf of flows) {
-    const w = wfNames(wf);
-    steps.push({
-      title: `Workflow: ${w.display}`,
-      body: `\`${w.fn}\` in workflows.bal waits for its human tasks in order with \`ctx->awaitHumanTask\`, then marks the run DONE:
-${bullet((wf.tasks ?? []).map((t) => `"${t.title || t.name}" for ${t.roles.join(", ") || "anyone"}${t.description ? ` ("${t.description}")` : ""}: it shows ${t.context ? (t.context.join(", ") || "no start fields") : "every start field"} beside the form; its answer type is generated from the task's fields (${t.fields.map((f) => fieldName(f)).join(", ") || "none"}), and the management API turns that type into the form the task form shows.`))}
-Add the real work between the tasks as \`@workflow:Activity\` functions called with \`ctx->callActivity\` (bind the result to a typed variable; \`_ = check ctx->callActivity(...)\` fails type inference). Branch on the answers (e.g. stop when a reviewer rejects). A risky activity can take \`approvalPolicy = {userRoles: ..., title: ...}\`, which puts an approval in the task inbox before it runs.`,
-      check: `a run of ${w.display} reaches each task in the inbox, and completing them finishes the run.`
-    });
+          check: `a run of ${w.display} follows every step, and each turn ends without errors in the log.`
+        });
+      } else {
+        steps.push({
+          title: `${int.title} · workflow ${w.display}`,
+          body: `\`${w.fn}\` in \`backend/${int.pkg}/workflows.bal\` waits for its human tasks in order with \`ctx->awaitHumanTask\`, then marks the run DONE:
+${bullet((wf.tasks ?? []).map((t) => `"${t.title || t.name}" (\`${taskKey(wf, t)}\`) for ${t.roles.join(", ") || "anyone"}${t.description ? ` ("${t.description}")` : ""}: it shows ${t.context ? (t.context.join(", ") || "no start fields") : "every start field"} beside the form; its answer type is generated from the task's fields (${t.fields.map((f) => fieldName(f)).join(", ") || "none"}), and the management API turns that type into the form the task form shows.`))}
+Add the real work between the tasks as \`@workflow:Activity\` functions called with \`ctx->callActivity\` (bind the result to a typed variable; \`_ = check ctx->callActivity(...)\` fails type inference). Branch on the answers. A risky activity can take \`approvalPolicy = {userRoles: ..., title: ...}\`, which puts an approval in the task inbox before it runs.`,
+          check: `a run of ${w.display} reaches each task in the inbox, and completing them finishes the run.`
+        });
+      }
+    }
   }
 
   steps.push({
     title: "Guardrails and durability",
     body: bullet([
-      agents.length ? "The model decides what to do next; the rules that matter belong in the activities: check preconditions and return an error that tells the model what to do instead." : "",
+      "The model decides what to do next; the rules that matter belong in the activities: check preconditions and return an error that tells the model what to do instead.",
       "Make every activity idempotent: idempotency keys on notifications and upload cases, deterministic chat message IDs (as generated). A retried activity must not act twice.",
-      "Kill the backend while a run waits (Ctrl+C), start it again and continue: nothing is lost. Avoid kill -9 in development.",
-      agents.length ? "A turn that exceeds `maxIter` fails the whole agent run (ballerina-library#9225): keep the stop rule and the activities quick." : "",
-      usesManagementApi(state) ? "Workflow 0.10.0 reports `canComplete: false` on every approval; the task components allow for it (the decide endpoints still check roles)." : "",
+      "Kill an integration while a run waits (Ctrl+C), start it again and continue: nothing is lost. Avoid kill -9 in development.",
+      "A turn that exceeds `maxIter` fails the whole agent run (ballerina-library#9225): keep the stop rule and the activities quick.",
+      managedIntegrations(state).length ? "Workflow 0.10.0 reports `canComplete: false` on every approval; the task components allow for it (the decide endpoints still check roles)." : "",
       "Event, input and activity payloads must be plain data: records, strings, numbers, arrays."
     ]),
     check: "the kill-and-restart test passes for each workflow and agent."
@@ -438,7 +454,7 @@ Add the real work between the tasks as \`@workflow:Activity\` functions called w
     id: "workflows",
     title: "Workflows and agents",
     assistant: ASSISTANTS[state.assistants.workflow].name,
-    intro: `${copilot ? "Work in the Ballerina package in `backend/`." : "You are building the workflows and durable agents of a Ballerina app, in `backend/`."} They are Ballerina workflow ${VERSIONS.workflow} programs that the app starts through its start service and that people take part in through chat and tasks.
+    intro: `${copilot ? "Work in the integration packages in `backend/`." : "You are building the workflows and durable agents of an app ecosystem, one Ballerina package per integration in `backend/`."} They are Ballerina workflow ${VERSIONS.workflow} programs the portal starts through each integration's start service, and people take part in through chat and tasks.
 
 ${context(state)}${copilot ? `
 

@@ -196,7 +196,7 @@ button:disabled { opacity: .4; cursor: default; }
 .wf .kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px; }
 .fields { display: grid; gap: 6px; }
-.field-row { display: grid; grid-template-columns: minmax(0, 1fr) 120px 28px 28px; gap: 6px; align-items: center; }
+.field-row { display: grid; grid-template-columns: minmax(0, 1fr) 120px 28px minmax(28px, auto); gap: 6px; align-items: center; }
 .field-row.head span { font-size: 11px; color: var(--muted); }
 .field-row .options { grid-column: 1 / -1; }
 .task-edit { border: 1px dashed var(--line); border-radius: 6px; padding: 8px; display: grid; gap: 8px; background: var(--panel); }
@@ -350,4 +350,39 @@ details.menu > summary::-webkit-details-marker { display: none; }
   .output { position: static; max-height: none; }
   .row.three { grid-template-columns: 1fr; }
   .top-actions { width: 100%; }
+}
+
+/* Identity: the users table and the claims map. */
+.users { display: grid; gap: 6px; }
+.user-row { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1fr) minmax(0, 1.2fr) 28px; gap: 6px; align-items: center;
+  padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.user-row fieldset.chips { grid-column: 1 / 4; }
+.user-row.head span { font-size: 11px; color: var(--muted); }
+.user-row fieldset.chips { margin: 0; padding: 0; border: none; }
+.claims { border-collapse: collapse; width: 100%; font-size: 12px; }
+.claims th, .claims td { text-align: left; padding: 5px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+.claims th { font-weight: 600; width: 38%; }
+.warning-note { color: var(--warn); background: var(--warn-soft); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+
+/* Architecture: the diagram and one card per integration. */
+.diagram svg { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--wf-bg); }
+.ad-box { stroke: var(--wf-stroke); stroke-width: 1.2; fill: var(--wf-panel); }
+.ad-box.portal { fill: var(--wf-nav); }
+.ad-box.idp { fill: var(--ok-soft); }
+.ad-box.int-new { fill: var(--wf-component); }
+.ad-box.int-existing { fill: var(--wf-custom); stroke-dasharray: 5 3; }
+.ad-box.commons { fill: var(--accent-soft); }
+.ad-title { font: 600 12px system-ui, sans-serif; fill: var(--fg); }
+.ad-line { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--wf-text); }
+.ad-link { fill: none; stroke: var(--wf-stroke); stroke-width: 1.4; }
+.ad-link.dashed { stroke-dasharray: 4 3; }
+.integration { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 10px; }
+.integration.existing { border-style: dashed; }
+.int-head { display: flex; gap: 8px; align-items: baseline; }
+.int-head .spacer { flex: 1; }
+.card-option.small { padding: 6px 10px; }
+@media (max-width: 720px) {
+  .user-row { grid-template-columns: 1fr 1fr; }
+  .user-row fieldset.chips { grid-column: 1 / -1; }
+  .user-row.head { display: none; }
 }

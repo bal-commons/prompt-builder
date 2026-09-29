@@ -1,13 +1,15 @@
 import {configureAuth, devUser} from "../../vendor/hub-ui.bundle.js";
 import "../../vendor/workflow-ui.bundle.js";
+import {IDPS} from "../catalog.js";
 import {wfNames} from "../code.js";
 import {startInputSchema} from "../contracts.js";
-import {component, pageComponents} from "../state.js";
-import {MOCK_ORIGIN, MOCK_URLS, MockBackend, mockEventSource, personasOf} from "./mock.js";
+import {component, findWorkflow, integrationOf, integrationsOf, managedIntegrations, newIntegrations, pageComponents, qualifiedTaskName,
+  taskTypes} from "../state.js";
+import {MOCK_ORIGIN, MOCK_URLS, mockIntegration, MockBackend, mockEventSource, personasOf} from "./mock.js";
 
 // The interactive preview. It renders the portal from the configuration the builder posts, with the real
-// bal-commons components, against the mock adapter (mock.js) or the live URLs of step 5. It never mutates a live
-// service unless the builder allows it for the session.
+// bal-commons components, against the mock adapter (mock.js) or the live URLs of the architecture step. It starts
+// on the app's login screen, and never mutates a live service unless the builder allows it for the session.
 
 const STORE = "pb-preview-data";
 const SELECTION = "pb-preview-selection";
@@ -17,7 +19,7 @@ const NativeEventSource = window.EventSource;
 let config;
 let editor = {persona: undefined, page: undefined, allowLive: false, token: ""};
 let backend;
-const sel = read(SELECTION) ?? {run: undefined, conversation: undefined, task: undefined, caseId: undefined, collapsed: {}};
+const sel = read(SELECTION) ?? {user: undefined, run: undefined, conversation: undefined, task: undefined, caseId: undefined, collapsed: {}};
 
 function read(key) {
   try {
@@ -37,12 +39,34 @@ function write(key, value) {
 
 // ---------------------------------------------------------------- adapters
 
-const urls = () => Object.fromEntries(Object.entries(MOCK_URLS).map(([id, mock]) => {
-  const c = config.connections[id];
-  return [id, c?.mode === "live" ? c.url.replace(/\/+$/, "") : mock];
-}));
+const trim = (url) => String(url ?? "").trim().replace(/\/+$/, "");
 
-const isLive = (url) => Object.entries(config.connections).some(([, c]) => c.mode === "live" && c.url && String(url).startsWith(c.url));
+// The shared commons services' base URLs.
+const urls = () => {
+  const c = config.connections.commons;
+  return Object.fromEntries(Object.entries(MOCK_URLS).map(([id, mock]) => [id, c?.mode === "live" && trim(c[id]) ? trim(c[id]) : mock]));
+};
+
+// An integration's base URLs: {app, workflow}.
+function intUrls(int) {
+  const mock = mockIntegration(int.id);
+  const c = config.connections[int.id];
+  if (c?.mode !== "live") return mock;
+  return {app: trim(c.url) || mock.app, workflow: trim(c.mgmtUrl) || mock.workflow};
+}
+
+function liveBases() {
+  const out = [];
+  const commons = config.connections.commons;
+  if (commons?.mode === "live") out.push(...Object.keys(MOCK_URLS).map((k) => trim(commons[k])));
+  for (const int of integrationsOf(config)) {
+    const c = config.connections[int.id];
+    if (c?.mode === "live") out.push(trim(c.url), trim(c.mgmtUrl));
+  }
+  return out.filter(Boolean);
+}
+
+const isLive = (url) => liveBases().some((base) => String(url).startsWith(base));
 
 window.fetch = async (input, init = {}) => {
   const url = typeof input === "string" ? input : input.url;
@@ -64,8 +88,8 @@ window.fetch = async (input, init = {}) => {
   }
   // Live services are read-only here unless the builder allows changes; the stream ticket only opens a stream.
   if (isLive(url) && method !== "GET" && !url.endsWith("/stream-ticket") && !editor.allowLive) {
-    return new Response(JSON.stringify({code: "PREVIEW_READ_ONLY", message: "The preview doesn't change live services. Allow it in step 5 (Connect services).",
-      error: {message: "The preview doesn't change live services. Allow it in step 5 (Connect services)."}}),
+    const message = "The preview doesn't change live services. Allow it in the Architecture step (Connections).";
+    return new Response(JSON.stringify({code: "PREVIEW_READ_ONLY", message, error: {message}}),
       {status: 403, headers: {"content-type": "application/json"}});
   }
   return nativeFetch(input, init);
@@ -89,13 +113,15 @@ function h(tag, attrs = {}, ...children) {
 
 function persona() {
   const people = personasOf(config);
-  return people.find((p) => p.id === editor.persona) ?? people[0];
+  return people.find((p) => p.id === sel.user) ?? people[0];
 }
+
+const isAdmin = () => persona().roles.some((r) => config.identity.adminRoles.includes(r));
 
 function authFor() {
   const p = persona();
   // Mock services and development-mode live services read the x-user-* headers; a session token is sent as a bearer.
-  if (editor.token && Object.values(config.connections).some((c) => c.mode === "live")) {
+  if (editor.token && liveBases().length) {
     const token = editor.token;
     configureAuth({headers: () => ({"x-user-id": p.id, "x-user-roles": p.roles.join(","), Authorization: `Bearer ${token}`})});
   } else {
@@ -115,19 +141,25 @@ function go(pageId, patch = {}) {
   select(patch);
 }
 
+// The caller's runs from every new integration, newest first.
 async function runsOf() {
-  const u = urls().app;
   const p = persona();
-  const response = await fetch(`${u}/app/runs`, {headers: {"x-user-id": p.id, "x-user-roles": p.roles.join(","),
-    ...(editor.token ? {Authorization: `Bearer ${editor.token}`} : {})}});
-  if (!response.ok) throw new Error(`${response.status}: ${(await response.json().catch(() => ({}))).message ?? response.statusText}`);
-  return response.json();
+  const lists = await Promise.all(newIntegrations(config).map(async (int) => {
+    const response = await fetch(`${intUrls(int).app}/app/runs`, {headers: {"x-user-id": p.id, "x-user-roles": p.roles.join(","),
+      ...(editor.token ? {Authorization: `Bearer ${editor.token}`} : {})}});
+    if (!response.ok) throw new Error(`${int.title}: ${response.status} ${(await response.json().catch(() => ({}))).message ?? response.statusText}`);
+    return (await response.json()).map((r) => ({...r, intId: int.id}));
+  }));
+  return lists.flat().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
-// Where a run is best seen: the page with its conversation, else the one with the task inbox.
+const placed = (p) => [...p.columns[0], ...p.columns[1]];
+const isInbox = (id) => id === "task-inbox" || id.startsWith("task-inbox@");
+
+// Where a run is best seen: the page with its conversation, else the one with a task inbox.
 function pageFor(run) {
-  const has = (id) => config.pages.find((p) => [...p.columns[0], ...p.columns[1]].includes(id));
-  return (run.conversationId && has("conversation")) || has("task-inbox") || has("runs") || config.pages[0];
+  const has = (test) => config.pages.find((p) => placed(p).some(test));
+  return (run.conversationId && has((id) => id === "conversation")) || has(isInbox) || has((id) => id === "runs") || config.pages[0];
 }
 
 function runsList() {
@@ -136,9 +168,9 @@ function runsList() {
     box.replaceChildren(h("div", {class: "box-head"}, "My runs", h("span", {class: "count"}, String(runs.length))));
     if (!runs.length) box.append(h("div", {class: "muted"}, "Nothing started yet. Use a start form."));
     for (const r of runs) {
-      const wf = config.workflows.find((w) => wfNames(w).fn === r.workflow);
+      const wf = integrationsOf(config).find((i) => i.id === r.intId)?.workflows.find((w) => wfNames(w).fn === r.workflow);
       box.append(h("button", {class: "run" + (sel.run === r.id ? " on" : ""), role: "option", "aria-selected": String(sel.run === r.id),
-        onclick: () => select({run: r.id, conversation: r.conversationId ?? sel.conversation, runInstance: r.instanceId})},
+        onclick: () => select({run: r.id, conversation: r.conversationId ?? sel.conversation, runInstance: r.instanceId, runInt: r.intId})},
         h("span", {class: "run-top"}, h("strong", {}, r.title), h("span", {class: "pill " + r.status}, r.status.toLowerCase())),
         h("span", {class: "muted"}, `${r.id} · ${wf ? wfNames(wf).display : r.workflow}${r.sample ? " · sample" : ""}`)));
     }
@@ -146,21 +178,40 @@ function runsList() {
   return box;
 }
 
+// One task inbox: every task of an integration, or (with a task type) only that type's tasks.
+function taskInbox(int, type, heading) {
+  const onRunsPage = config.pages.some((p) => p.id === editor.page && placed(p).includes("runs"));
+  return h("div", {class: "card"}, heading ? h("div", {class: "box-head"}, heading) : null,
+    h("workflow-task-inbox", {"base-url": intUrls(int).workflow, "poll-seconds": "5", ".selected": sel.task?.taskId,
+      "task-name": type ? qualifiedTaskName(type.workflow, type.task) : undefined,
+      "instance-id": sel.run && onRunsPage && sel.runInt === int.id ? sel.runInstance : undefined,
+      "onworkflow-task-select": (e) => select({task: {taskId: e.detail.task.taskId, kind: e.detail.task.kind, intId: int.id}})}));
+}
+
 function element(id) {
   const c = component(config, id);
   const u = urls();
   const me = persona().id;
-  const admin = persona().roles.some((r) => config.app.adminRoles.includes(r));
+  const admin = isAdmin();
   if (!c) return h("div", {class: "missing"}, `${id} (removed)`);
   if (c.start) {
-    const wf = config.workflows.find((w) => w.id === c.start);
-    return h("div", {class: "card"}, h("workflow-start-form", {heading: c.name, action: `${u.app}/start/${wfNames(wf).path}`,
+    const wf = findWorkflow(config, c.start);
+    const int = integrationOf(config, wf.id);
+    const existing = int.source !== "new";
+    return h("div", {class: "card"}, h("workflow-start-form", {heading: c.name,
+      action: existing ? `${intUrls(int).workflow}/workflows` : `${intUrls(int).app}/start/${wfNames(wf).path}`,
+      "workflow-type": existing ? wf.fixedName ?? wf.name : undefined,
       ".schema": startInputSchema(wf.input), "submit-label": wf.kind === "agent" ? "Start" : "Submit",
       "onworkflow-started": (e) => {
         const r = e.detail.response;
+        if (existing) return parent.postMessage({type: "preview-note", text: `Started ${wf.title || wf.name} in ${int.title} (${r.workflowId}).`}, "*");
         const target = r.conversationId ? pageFor({conversationId: r.conversationId}) : config.pages.find((p) => p.id === editor.page);
-        go(target?.id ?? editor.page, {run: r.runId, conversation: r.conversationId ?? sel.conversation, runInstance: r.instanceId});
+        go(target?.id ?? editor.page, {run: r.runId, conversation: r.conversationId ?? sel.conversation, runInstance: r.instanceId, runInt: int.id});
       }}));
+  }
+  if (c.taskType) {
+    const type = taskTypes(config).find((t) => t.ref === c.taskType);
+    return taskInbox(type.integration, type);
   }
   switch (id) {
     case "runs": return h("div", {class: "card"}, runsList());
@@ -179,14 +230,17 @@ function element(id) {
     case "inbox":
       return h("div", {class: "card"}, h("commons-inbox", {"base-url": u.notification, "show-filters": true,
         "oncommons-notification-click": (e) => follow(e.detail.notification)}));
-    case "task-inbox":
-      return h("div", {class: "card"}, h("workflow-task-inbox", {"base-url": u.workflow, "poll-seconds": "5", ".selected": sel.task?.taskId,
-        "instance-id": sel.run && config.pages.find((p) => p.id === editor.page && [...p.columns[0], ...p.columns[1]].includes("runs")) ? sel.runInstance : undefined,
-        "onworkflow-task-select": (e) => select({task: {taskId: e.detail.task.taskId, kind: e.detail.task.kind}})}));
-    case "task-form":
-      return sel.task
-        ? h("div", {class: "card"}, h("workflow-task-form", {"base-url": u.workflow, kind: sel.task.kind, "task-id": sel.task.taskId}))
+    case "task-inbox": {
+      const ints = managedIntegrations(config);
+      if (!ints.length) return h("div", {class: "card empty"}, "No integration has human tasks yet. Add them in the Architecture step.");
+      return ints.map((int) => taskInbox(int, undefined, ints.length > 1 ? int.title : undefined));
+    }
+    case "task-form": {
+      const int = sel.task && integrationsOf(config).find((i) => i.id === sel.task.intId);
+      return int
+        ? h("div", {class: "card"}, h("workflow-task-form", {"base-url": intUrls(int).workflow, kind: sel.task.kind, "task-id": sel.task.taskId}))
         : h("div", {class: "card empty"}, "Choose a task in the task inbox.");
+    }
     case "case-list":
       return h("div", {class: "card"}, h("commons-case-list", {"base-url": u.attachment, ".me": me, admin, ".selected": sel.caseId,
         "oncommons-case-select": (e) => select({caseId: e.detail.case.id})}));
@@ -199,8 +253,8 @@ function element(id) {
     case "bell":
       return h("commons-notification-bell", {"base-url": u.notification, "oncommons-bell-click": openInbox});
     case "user-menu":
-      return h("label", {class: "who"}, "Acting as ", h("select", {onchange: (e) => { editor.persona = e.target.value; parent.postMessage({type: "preview-persona", persona: e.target.value}, "*"); start(); }},
-        personasOf(config).map((p) => h("option", {value: p.id, selected: p.id === persona().id}, `${p.name} (${p.roles.join(", ")})`))));
+      return h("div", {class: "who"}, h("span", {}, `${persona().name} · ${persona().roles.join(", ") || "no role"}`),
+        h("button", {class: "link", onclick: signOut}, "Sign out"));
   }
   return h("div", {class: "card custom"}, h("strong", {}, c.name), h("p", {class: "muted"}, c.description || "A custom component."),
     h("span", {class: "tag"}, "Custom: your assistant builds this"));
@@ -215,6 +269,33 @@ function follow(n) {
     closeDrawer();
     go(pageFor(run).id, {run: run.id, conversation: run.conversationId ?? sel.conversation, runInstance: run.instanceId});
   }).catch(() => undefined);
+}
+
+function signIn(id) {
+  sel.user = id;
+  parent.postMessage({type: "preview-persona", persona: id}, "*");
+  select({run: undefined, conversation: undefined, task: undefined, caseId: undefined});
+}
+
+function signOut() {
+  select({user: undefined, run: undefined, conversation: undefined, task: undefined, caseId: undefined});
+}
+
+// The app's login screen. With an identity provider the preview simulates its sign-in: pick who signs in.
+function login() {
+  const idp = IDPS.find((i) => i.id === config.identity.idp.kind);
+  const people = personasOf(config);
+  let chosen = people[0]?.id;
+  return h("div", {class: "login"}, h("div", {class: "login-card", role: "form", "aria-label": "Sign in"},
+    h("h1", {}, config.identity.login.title || config.app.name),
+    config.identity.login.subtitle ? h("p", {class: "muted"}, config.identity.login.subtitle) : null,
+    idp.id === "none"
+      ? [h("p", {class: "small muted"}, "Development sign-in: choose a user."),
+        people.map((p) => h("button", {class: "login-user", onclick: () => signIn(p.id)}, h("strong", {}, p.name), h("span", {class: "muted"}, p.roles.join(", ") || "no role")))]
+      : [h("label", {class: "small"}, "Simulated account ", h("select", {"aria-label": "Account", onchange: (e) => { chosen = e.target.value; }},
+          people.map((p) => h("option", {value: p.id}, `${p.name} (${p.roles.join(", ")})`)))),
+        h("button", {class: "login-idp", onclick: () => signIn(chosen)}, `Sign in with ${idp.name}`),
+        h("p", {class: "small muted"}, "The preview doesn't contact the identity provider; the real app uses the OIDC flow.")]));
 }
 
 function openInbox() {
@@ -251,6 +332,10 @@ function pageBody(page) {
 
 function render() {
   if (!config) return;
+  if (!sel.user || !personasOf(config).some((p) => p.id === sel.user)) {
+    $("#app").replaceChildren(login());
+    return;
+  }
   authFor();
   const pages = config.pages;
   const page = pages.find((p) => p.id === editor.page) ?? pages[0];
@@ -263,7 +348,7 @@ function render() {
     const panes = config.layout.hubPanes;
     const hub = h("commons-hub", {"notifications-url": panes.includes("inbox") ? u.notification : undefined,
       "chat-url": panes.includes("chats") ? u.chat : undefined, "attachments-url": panes.includes("files") ? u.attachment : undefined,
-      panes: panes.join(" "), ".me": persona().id, admin: persona().roles.some((r) => config.app.adminRoles.includes(r))},
+      panes: panes.join(" "), ".me": persona().id, admin: isAdmin()},
     h("div", {slot: "brand", class: "brand"}, config.app.name), h("div", {slot: "nav-end"}, element("user-menu")),
     pages.map((p) => h("section", {pane: p.id, label: p.title, class: "pane"}, pageBody(p))));
     root.replaceChildren(hub);
@@ -286,15 +371,12 @@ function render() {
 
 // ---------------------------------------------------------------- start
 
-function start() {
-  write(STORE, backend.snapshot());
-  render();
-}
-
 window.addEventListener("message", (e) => {
   const msg = e.data ?? {};
   if (msg.type === "config") {
     config = msg.config;
+    // The builder's "View as" signs in as that user.
+    if (msg.editor?.persona && msg.editor.persona !== editor.persona) sel.user = msg.editor.persona;
     editor = {...editor, ...msg.editor};
     if (!backend) {
       const saved = read(STORE);
@@ -310,7 +392,7 @@ window.addEventListener("message", (e) => {
   if (msg.type === "reset") {
     sessionStorage.removeItem(STORE);
     sessionStorage.removeItem(SELECTION);
-    Object.assign(sel, {run: undefined, conversation: undefined, task: undefined, caseId: undefined, collapsed: {}});
+    Object.assign(sel, {user: undefined, run: undefined, conversation: undefined, task: undefined, caseId: undefined, collapsed: {}});
     backend = new MockBackend(config);
     backend.save = () => write(STORE, {...backend.snapshot(), appName: config.app.name});
     window.EventSource = mockEventSource(backend, NativeEventSource);

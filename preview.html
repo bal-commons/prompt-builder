@@ -64,6 +64,18 @@
       box-shadow: -8px 0 24px rgb(0 0 0 / .15); padding: 12px; overflow: auto; z-index: 5; display: grid; gap: 10px; align-content: start; }
     .drawer[hidden] { display: none; }
     .drawer-head { display: flex; justify-content: space-between; align-items: center; }
+    .who .link { border: none; background: none; color: var(--accent); cursor: pointer; padding: 0 0 0 8px; font-size: 12px; }
+    .login { height: 100%; display: grid; place-items: center; padding: 16px; }
+    .login-card { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px;
+      display: grid; gap: 10px; }
+    .login-card h1 { font-size: 20px; margin: 0; }
+    .login-card p { margin: 0; }
+    .login-user { display: flex; justify-content: space-between; gap: 8px; text-align: left; border: 1px solid var(--line); background: var(--panel);
+      padding: 9px 12px; border-radius: 8px; cursor: pointer; }
+    .login-user:hover { border-color: var(--accent); }
+    .login-idp { border: none; background: var(--accent); color: #fff; padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    .login-card select { margin-left: 6px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .small { font-size: 12px; }
     .pane { display: block; }
     commons-hub { height: 100%; }
     @media (max-width: 720px) {

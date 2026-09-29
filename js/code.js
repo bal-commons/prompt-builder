@@ -1,6 +1,14 @@
 import {ACTIVITIES, DATABASES, IDPS, SERVICES, VERSIONS} from "./catalog.js";
 import {choices, fieldName} from "./contracts.js";
-import {camel, enabledServices, identifier, notificationEvents, pascal, usesManagementApi} from "./state.js";
+import {seedFile} from "./identity.js";
+import {camel, enabledServices as ecosystemServices, identifier, integrationsOf, managedIntegrations, newIntegrations,
+  notificationEvents, pascal} from "./state.js";
+
+// The generators below write one integration's package. They take a package view (packageState()): the
+// integration's workflows and names in the shape the generators read, its ports, the commons services it calls,
+// and whether it serves the workflow management API.
+const enabledServices = (pstate) => pstate.services ?? [];
+const usesManagementApi = (pstate) => !!pstate.mgmt;
 
 // Generates a Ballerina backend for the selection: the commons servers in one process, typed clients, a start
 // service per workflow and agent, the runs table, the agents with their activities, the workflows with their
@@ -45,7 +53,7 @@ export function wfNames(wf) {
 }
 
 export {fieldName};
-const tells = (state, event) => notificationEvents(state).includes(event);
+const tells = (state, event) => (state.events ?? []).includes(event);
 
 function ballerinaType(field) {
   switch (field.type) {
@@ -110,12 +118,11 @@ version = "${version}"`).join("\n")}
 
 export function mainBal(state) {
   const db = DATABASES.find((d) => d.id === state.db);
-  const imports = ["import ballerina/log;", `import ${db.driver} as _;`,
-    ...enabledServices(state).map((id) => `import ${SERVICES.find((s) => s.id === id).server} as _;`)];
+  const imports = ["import ballerina/log;", `import ${db.driver} as _;`];
   if (usesManagementApi(state)) imports.push("import ballerina/workflow.management.rest as _;");
   return `${imports.sort().join("\n")}
 
-// One process runs the commons services${state.workflows.length ? ", the workflows and agents" : ""}${usesManagementApi(state) ? ", the workflow management API" : ""} and the app API.
+// ${state.app.name}: the app API${state.workflows.length ? ", the start service, the workflows and agents" : ""}${usesManagementApi(state) ? " and the workflow management API" : ""}. The commons services run in their own package.
 function init() returns error? {
     check initStore();
     log:printInfo(string \`${state.app.name.replace(/`/g, "'")} API on port \${appPort}\`);
@@ -129,7 +136,7 @@ export function configBal(state) {
     "import commons/service_commons.db as sdb;",
     "",
     "# Port of the app API" + (state.workflows.length ? ", the start service" : "") + (needsHooks(state) ? " and the webhook receivers." : "."),
-    "configurable int appPort = 9090;"
+    `configurable int appPort = ${state.ports?.app ?? 9090};`
   ];
   for (const id of enabledServices(state)) {
     const s = SERVICES.find((x) => x.id === id);
@@ -992,7 +999,7 @@ function managementToml(state) {
 # The workflow management API: the task inbox and task forms read and decide human tasks and approvals here.
 [ballerina.workflow.management.rest]
 enableManagementApi = true
-port = 8234
+port = ${state.ports?.mgmt ?? 8234}
 corsAllowOrigins = ["http://localhost:5173"]
 enableBasicAuth = false${idp.kind === "none" ? `
 # Development: no token; identity comes from the x-user-id / x-user-roles headers.` : `
@@ -1009,12 +1016,15 @@ rolesClaim = ${lit(idp.rolesClaim)}`}
 export function configToml(state) {
   const n = names(state);
   const root = `${n.org}.${n.pkg}`;
-  let out = `# Replace every change-me before you deploy; keep secrets out of version control.
+  const c = state.commonsUrls ?? {};
+  let out = `# ${state.app.name}. Replace every change-me before you deploy; keep secrets out of version control.
+# serviceApiKey and webhookSecret must match the commons package's Config.toml.
 
 [${root}]
 serviceApiKey = "change-me"${needsHooks(state) ? `
 webhookSecret = "change-me"` : ""}
-corsAllowOrigins = ["http://localhost:5173"]
+corsAllowOrigins = ["http://localhost:5173"]${enabledServices(state).map((id) => `
+${camel(id)}Url = ${lit(c[id])}`).join("")}
 
 ${authToml(state, root)}
 ${dbToml(state, root, n)}`;
@@ -1025,46 +1035,118 @@ ${dbToml(state, root, n)}`;
 mode = "${state.deploy === "compose" ? "SELF_HOSTED" : "LOCAL"}"
 url = "${state.deploy === "compose" ? "temporal:7233" : "localhost:7233"}"
 namespace = "default"
+# Integrations share the Temporal namespace; the task queue keeps this one's runs apart.
 taskQueue = "${n.pkg.toUpperCase()}"
 `;
   }
   if (usesManagementApi(state)) {
     out += managementToml(state);
   }
-  for (const id of enabledServices(state)) {
-    const section = `commons.${id}.server`;
-    out += `
-[${section}]
-ns = "${n.pkg}"
-corsAllowOrigins = ["http://localhost:5173"]${id === "attachment" ? `
-linkSecret = "change-me"${state.app.adminRoles.length ? `
-adminRoles = [
-${state.app.adminRoles.map((r) => `    {role = ${lit(r)}, permissions = ["read", "delete", "reopen", "close"]}`).join(",\n")}
-]` : ""}` : ""}
-
-${authToml(state, section)}
-${dbToml(state, section, n)}`;
-    const hooked = id === "chat" ? chatAgents(state) : id === "attachment" ? uploadAgents(state) : [];
-    for (const wf of hooked) {
-      out += `
-# ${wfNames(wf).display}: the service calls this app when something happens in the agent's ${id === "chat" ? "conversations" : "upload cases"}.
-[[${section}.webhooks]]
-participantId = ${lit(wfNames(wf).agentId)}
-url = "http://localhost:9090/hooks/${id === "chat" ? "chat" : "attachments"}"
-secret = "change-me"
-events = ${id === "chat" ? `["message.created", "form.submitted"]` : `["case.submitted"]`}
-`;
-    }
-  }
   return out;
 }
 
+// ---------------------------------------------------------------- the ecosystem
+
+const PORT_BASE = {app: 9090, mgmt: 8234};
+
+// The package view of one new integration, for the generators above.
+export function packageState(state, int) {
+  const index = newIntegrations(state).indexOf(int);
+  const agents = int.workflows.filter((w) => w.kind === "agent");
+  const services = new Set();
+  for (const a of agents) {
+    if (a.chat) services.add("chat");
+    if (a.uploads) services.add("attachment");
+    for (const act of ACTIVITIES.filter((x) => a.activities.includes(x.id))) if (act.service !== "app") services.add(act.service);
+  }
+  const events = int.workflows.length ? notificationEvents(state) : [];
+  if (events.length) services.add("notification");
+  const available = ecosystemServices(state);
+  const mgmt = managedIntegrations(state).some((i) => i.id === int.id)
+    || int.workflows.some((w) => (w.tasks ?? []).length || w.approval?.on);
+  return {
+    ...state,
+    app: {name: int.title, org: int.org, pkg: int.pkg, idPrefix: int.idPrefix, roles: state.identity.roles, adminRoles: state.identity.adminRoles},
+    idp: state.identity.idp,
+    workflows: int.workflows,
+    integration: int,
+    ports: {app: PORT_BASE.app + index, mgmt: PORT_BASE.mgmt + index},
+    services: ["notification", "chat", "attachment"].filter((id) => services.has(id) && available.includes(id)),
+    events: events.filter(() => available.includes("notification")),
+    mgmt,
+    commonsUrls: Object.fromEntries(SERVICES.map((s) => [s.id, `http://${state.deploy === "compose" ? "commons" : "localhost"}:${s.port}${s.basePath}`]))
+  };
+}
+
+// The shared commons services, in their own package.
+export function commonsFiles(state) {
+  const services = ecosystemServices(state);
+  if (!services.length) return [];
+  const db = DATABASES.find((d) => d.id === state.db);
+  const org = identifier(newIntegrations(state)[0]?.org ?? "myorg", "myorg");
+  const pstate = {...state, idp: state.identity.idp, app: {pkg: "commons_services"}};
+  const hooks = newIntegrations(state).flatMap((int) => {
+    const p = packageState(state, int);
+    const base = `http://${state.deploy === "compose" ? int.pkg.replace(/_/g, "-") : "localhost"}:${p.ports.app}`;
+    return int.workflows.filter((w) => w.kind === "agent").flatMap((w) => [
+      ...(w.chat && services.includes("chat") ? [["chat", w, base]] : []),
+      ...(w.uploads && services.includes("attachment") ? [["attachment", w, base]] : [])]);
+  });
+  const toml = `[package]
+org = "${org}"
+name = "commons_services"
+version = "0.1.0"
+distribution = "${VERSIONS.ballerina}"
+${[...services, "service_commons"].map((id) => `
+[[dependency]]
+org = "commons"
+name = "${id}"
+version = "${VERSIONS.commons}"`).join("\n")}
+`;
+  const main = `${["import ballerina/http;", `import ${db.driver} as _;`, ...services.map((id) => `import ${SERVICES.find((s) => s.id === id).server} as _;`)].sort().join("\n")}
+
+// The shared commons services of ${state.app.name}: ${services.map((id) => SERVICES.find((s) => s.id === id).name.toLowerCase()).join(", ")}.
+// Each listens on its own port (see Config.toml); the integrations call them with the service API key.
+service /health on new http:Listener(9199) {
+    resource function get .() returns string => "ok";
+}
+`;
+  let config = `# The commons services. Replace every change-me; apiKeyValue must match each integration's serviceApiKey,
+# and every webhook secret its webhookSecret.
+`;
+  for (const id of services) {
+    const section = `commons.${id}.server`;
+    config += `
+[${section}]
+ns = "${identifier(state.app.name, "app")}"
+corsAllowOrigins = ["http://localhost:5173"]${id === "attachment" ? `
+linkSecret = "change-me"${state.identity.adminRoles.length ? `
+adminRoles = [
+${state.identity.adminRoles.map((r) => `    {role = ${lit(r)}, permissions = ["read", "delete", "reopen", "close"]}`).join(",\n")}
+]` : ""}` : ""}
+
+${authToml(pstate, section)}
+${dbToml(pstate, section, {pkg: "commons_services"})}`;
+    for (const [svc, wf, base] of hooks.filter(([svc]) => svc === id)) {
+      config += `
+# ${wfNames(wf).display}: the service calls its integration when something happens in the agent's ${svc === "chat" ? "conversations" : "upload cases"}.
+[[${section}.webhooks]]
+participantId = ${lit(wfNames(wf).agentId)}
+url = "${base}/hooks/${svc === "chat" ? "chat" : "attachments"}"
+secret = "change-me"
+events = ${svc === "chat" ? `["message.created", "form.submitted"]` : `["case.submitted"]`}
+`;
+    }
+  }
+  return [["backend/commons/Ballerina.toml", toml], ["backend/commons/main.bal", main], ["backend/commons/Config.toml", config]];
+}
+
 export function dockerCompose(state) {
-  const n = names(state);
-  const idp = IDPS.find((i) => i.id === state.idp.kind);
-  const wf = state.workflows.length > 0;
+  const idp = IDPS.find((i) => i.id === state.identity.idp.kind);
+  const ints = newIntegrations(state);
+  const hasWorkflows = ints.some((i) => i.workflows.length);
   const services = [];
-  if (wf) {
+  if (hasWorkflows) {
     services.push(`  temporal-db:
     image: postgres:16-alpine
     environment:
@@ -1085,20 +1167,16 @@ export function dockerCompose(state) {
     ports:
       - "7233:7233"`);
   }
-  if (state.db === "postgresql") {
-    services.push(`  db:
+  if (state.db !== "h2") {
+    services.push(state.db === "postgresql" ? `  db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ${n.pkg}
       POSTGRES_USER: app
       POSTGRES_PASSWORD: \${DB_PASSWORD:?set DB_PASSWORD in .env}
     volumes:
-      - app-db:/var/lib/postgresql/data`);
-  } else if (state.db === "mysql") {
-    services.push(`  db:
+      - app-db:/var/lib/postgresql/data` : `  db:
     image: mysql:8.4
     environment:
-      MYSQL_DATABASE: ${n.pkg}
       MYSQL_USER: app
       MYSQL_PASSWORD: \${DB_PASSWORD:?set DB_PASSWORD in .env}
       MYSQL_RANDOM_ROOT_PASSWORD: "yes"
@@ -1113,40 +1191,63 @@ export function dockerCompose(state) {
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: \${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
     volumes:
-      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+      # The realm with the roles, the initial users and the portal client (identity/realm.json).
+      - ./identity/realm.json:/opt/keycloak/data/import/realm.json:ro
     ports:
       - "8080:8080"`);
   } else if (idp.id === "thunder") {
     services.push(`  thunder:
     image: ${idp.image}
+    entrypoint: ["sh", "-c"]
+    # Loads the users, their groups (roles) and the portal from identity/resources.yaml at startup.
+    command:
+      - |
+        [ -f config/certs/crypto.key ] || ./setup.sh
+        exec ./start.sh /opt/app/resources.yaml
     environment:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: \${THUNDER_ADMIN_PASSWORD:?set THUNDER_ADMIN_PASSWORD in .env}
     volumes:
-      - ./thunder/resources.yaml:/opt/thunder/resources.yaml:ro
+      - thunder-data:/opt/thunderid/config
+      - thunder-db:/opt/thunderid/database
+      - ./identity/resources.yaml:/opt/app/resources.yaml:ro
     ports:
       - "8090:8090"`);
   }
-  const ports = ["9090", ...enabledServices(state).map((id) => String(SERVICES.find((s) => s.id === id).port)),
-    ...(usesManagementApi(state) ? ["8234"] : [])];
-  services.push(`  app:
-    build: ./backend
-    depends_on: [${[wf && "temporal", state.db !== "h2" && "db", idp.id === "keycloak" && "keycloak", idp.id === "thunder" && "thunder"].filter(Boolean).join(", ")}]
+  const deps = [hasWorkflows && "temporal", state.db !== "h2" && "db", idp.id === "keycloak" && "keycloak", idp.id === "thunder" && "thunder"].filter(Boolean);
+  if (ecosystemServices(state).length) {
+    services.push(`  commons:
+    build: ./backend/commons
+    depends_on: [${deps.filter((d) => d !== "temporal").join(", ")}]
     volumes:
-      - ./backend/Config.toml:/app/Config.toml:ro
-      - app-data:/app/target/data
+      - ./backend/commons/Config.toml:/app/Config.toml:ro
+      - commons-data:/app/target/data
     ports:
-${ports.map((p) => `      - "${p}:${p}"`).join("\n")}`,
-  `  web:
+${ecosystemServices(state).map((id) => `      - "${SERVICES.find((s) => s.id === id).port}:${SERVICES.find((s) => s.id === id).port}"`).join("\n")}`);
+  }
+  for (const int of ints) {
+    const p = packageState(state, int);
+    services.push(`  ${int.pkg.replace(/_/g, "-")}:
+    build: ./backend/${int.pkg}
+    depends_on: [${[...deps, ecosystemServices(state).length && "commons"].filter(Boolean).join(", ")}]
+    volumes:
+      - ./backend/${int.pkg}/Config.toml:/app/Config.toml:ro
+      - ${int.pkg.replace(/_/g, "-")}-data:/app/target/data
+    ports:
+      - "${p.ports.app}:${p.ports.app}"${p.mgmt ? `
+      - "${p.ports.mgmt}:${p.ports.mgmt}"` : ""}`);
+  }
+  services.push(`  web:
     image: nginx:1.27-alpine
-    depends_on: [app]
     volumes:
       - ./frontend/dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "5173:80"`);
-  const volumes = ["app-data", wf && "temporal-db", state.db !== "h2" && "app-db"].filter(Boolean);
-  return `# ${state.app.name}: ${idp.id === "authentik" ? "authentik runs from its own compose file (it needs PostgreSQL and Redis). " : ""}secrets come from .env (git-ignored).
+  const volumes = [...ints.map((i) => `${i.pkg.replace(/_/g, "-")}-data`), ecosystemServices(state).length && "commons-data",
+    hasWorkflows && "temporal-db", state.db !== "h2" && "app-db", idp.id === "thunder" && "thunder-data", idp.id === "thunder" && "thunder-db"].filter(Boolean);
+  return `# ${state.app.name}: the integrations, the commons services${idp.id === "none" ? "" : `, ${idp.name}`} and the portal.
+# ${idp.id === "authentik" ? "authentik runs from its own compose file (it needs PostgreSQL and Redis). " : ""}Secrets come from .env (git-ignored).
 services:
 ${services.join("\n\n")}
 
@@ -1155,23 +1256,35 @@ ${volumes.map((v) => `  ${v}:`).join("\n")}
 `;
 }
 
-// The browser-facing paths: [proxy path, where nginx sends it, where the dev server sends it].
-// The development targets are the live URLs of step 5 when set, else the generated app's local ports.
+// The browser-facing paths: [proxy path, where nginx sends it, where the dev server sends it]. The development
+// targets are the live URLs of the architecture step when set, else the generated packages' local ports.
 export function proxies(state) {
-  const live = (id, path, fallback) => {
+  const live = (id, key, path, fallback) => {
     const c = state.connections?.[id];
-    return c?.mode === "live" && c.url.trim() ? c.url.trim().replace(/\/+$/, "") + path : fallback;
+    const url = c?.mode === "live" ? String(c[key] ?? "").trim() : "";
+    return url ? url.replace(/\/+$/, "") + path : fallback;
   };
-  return [
-    ["/api/app", "http://app:9090/app", live("app", "/app", "http://localhost:9090/app")],
-    ...(state.workflows.length ? [["/api/start", "http://app:9090/start", live("app", "/start", "http://localhost:9090/start")]] : []),
-    ...(usesManagementApi(state) ? [["/api/workflow", "http://app:8234/workflow", live("workflow", "", "http://localhost:8234/workflow")]] : []),
-    ...enabledServices(state).map((id) => {
-      const s = SERVICES.find((x) => x.id === id);
-      const path = id === "notification" ? "notifications" : id === "attachment" ? "attachments" : "chat";
-      return [`/api/${path}`, `http://app:${s.port}${s.basePath}`, live(id, "", `http://localhost:${s.port}${s.basePath}`)];
-    })
-  ];
+  const out = [];
+  for (const int of integrationsOf(state)) {
+    const isNew = int.source === "new";
+    const p = isNew ? packageState(state, int) : undefined;
+    const host = int.pkg.replace(/_/g, "-");
+    const managed = isNew ? p.mgmt : managedIntegrations(state).some((i) => i.id === int.id);
+    if (isNew) {
+      out.push([`/api/${int.pkg}/app`, `http://${host}:${p.ports.app}/app`, live(int.id, "url", "/app", `http://localhost:${p.ports.app}/app`)]);
+      if (int.workflows.length) out.push([`/api/${int.pkg}/start`, `http://${host}:${p.ports.app}/start`, live(int.id, "url", "/start", `http://localhost:${p.ports.app}/start`)]);
+    }
+    if (managed) {
+      out.push([`/api/${int.pkg}/workflow`, isNew ? `http://${host}:${p.ports.mgmt}/workflow` : (state.connections?.[int.id]?.mgmtUrl || "http://<integration>:8234/workflow"),
+        live(int.id, "mgmtUrl", "", isNew ? `http://localhost:${p.ports.mgmt}/workflow` : (state.connections?.[int.id]?.mgmtUrl || "http://<its host>:8234/workflow"))]);
+    }
+  }
+  for (const id of ecosystemServices(state)) {
+    const s = SERVICES.find((x) => x.id === id);
+    const path = id === "notification" ? "notifications" : id === "attachment" ? "attachments" : "chat";
+    out.push([`/api/${path}`, `http://commons:${s.port}${s.basePath}`, live("commons", id, "", `http://localhost:${s.port}${s.basePath}`)]);
+  }
+  return out;
 }
 
 export function nginxConf(state) {
@@ -1185,7 +1298,7 @@ export function nginxConf(state) {
 ${proxies(state).map(([from, to]) => `
     location ${from}/ {
         proxy_pass ${to}/;
-        # The components hold a server-sent events stream open: don't buffer it or time it out.
+        # Some components hold a server-sent events stream open: don't buffer it or time it out.
         proxy_buffering off;
         proxy_read_timeout 1h;
         proxy_http_version 1.1;
@@ -1196,9 +1309,9 @@ ${proxies(state).map(([from, to]) => `
 `;
 }
 
-// How the app tells people about runs and tasks.
+// How an integration tells people about runs and tasks.
 export function notifyBal(state) {
-  if (!notificationEvents(state).length) return "";
+  if (!(state.events ?? []).length) return "";
   return `import ballerina/log;
 import commons/notification;
 
@@ -1214,24 +1327,35 @@ isolated function tell(notification:RecipientType recipientType, string recipien
 `;
 }
 
+// One new integration's package.
+export function integrationFiles(state, int) {
+  const p = packageState(state, int);
+  const dir = `backend/${int.pkg}`;
+  return [
+    ["Ballerina.toml", ballerinaToml(p)],
+    ["main.bal", mainBal(p)],
+    ["config.bal", configBal(p)],
+    ["types.bal", typesBal(p)],
+    ["clients.bal", clientsBal(p)],
+    ["store.bal", storeBal(p)],
+    ["app.bal", appBal(p)],
+    ["start.bal", startBal(p)],
+    ["agents.bal", agentsBal(p)],
+    ["workflows.bal", workflowsBal(p)],
+    ["activities.bal", activitiesBal(p)],
+    ["hooks.bal", hooksBal(p)],
+    ["notify.bal", notifyBal(p)],
+    ["Config.toml", configToml(p)]
+  ].filter(([, content]) => content).map(([path, content]) => [`${dir}/${path}`, content]);
+}
+
 // Every generated file, in the order a reader should see them.
 export function files(state) {
-  const list = [
-    ["backend/Ballerina.toml", ballerinaToml(state)],
-    ["backend/main.bal", mainBal(state)],
-    ["backend/config.bal", configBal(state)],
-    ["backend/types.bal", typesBal(state)],
-    ["backend/clients.bal", clientsBal(state)],
-    ["backend/store.bal", storeBal(state)],
-    ["backend/app.bal", appBal(state)],
-    ["backend/start.bal", startBal(state)],
-    ["backend/agents.bal", agentsBal(state)],
-    ["backend/workflows.bal", workflowsBal(state)],
-    ["backend/activities.bal", activitiesBal(state)],
-    ["backend/hooks.bal", hooksBal(state)],
-    ["backend/notify.bal", notifyBal(state)],
-    ["backend/Config.toml", configToml(state)]
-  ].filter(([, content]) => content);
+  const list = [];
+  for (const int of newIntegrations(state)) list.push(...integrationFiles(state, int));
+  list.push(...commonsFiles(state));
+  const seed = seedFile(state);
+  if (seed) list.push(seed);
   if (state.deploy === "compose") {
     list.push(["docker-compose.yml", dockerCompose(state)], ["nginx.conf", nginxConf(state)]);
   }
