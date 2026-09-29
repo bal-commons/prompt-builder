@@ -448,8 +448,11 @@ export function startBal(state) {
     return `
     // Starts ${an(w.display)}${chat ? ": opens a chat between the caller and the agent, which joins it as its own participant" : ""}.
     resource function post ${ident(w.path)}(http:RequestContext ctx, @http:Payload ${w.input} input)
-            returns http:Created|error {
-        sauth:CallerIdentity caller = check sauth:callerOf(ctx);
+            returns http:Created|${(wf.startRoles ?? []).length ? "http:Forbidden|" : ""}error {
+        sauth:CallerIdentity caller = check sauth:callerOf(ctx);${(wf.startRoles ?? []).length ? `
+        if !holdsAnyRole(caller, [${wf.startRoles.map(lit).join(", ")}]) {
+            return service_commons:forbidden(${lit(`Starting ${w.display} needs the role ${wf.startRoles.join(" or ")}`)});
+        }` : ""}
         string runId = check nextRunId();
         string? conversationId = ();${chat ? `
         chat:Conversation conversation = check chats->createConversation({
@@ -488,7 +491,16 @@ service http:InterceptableService /'start on appListener {
         [new (authenticator, tickets), new];
 ${resources}
 }
-`;
+${state.workflows.some((wf) => (wf.startRoles ?? []).length) ? `
+isolated function holdsAnyRole(sauth:CallerIdentity caller, string[] roles) returns boolean {
+    foreach string role in roles {
+        if caller.roles.indexOf(role) != () {
+            return true;
+        }
+    }
+    return false;
+}
+` : ""}`;
 }
 
 export function agentsBal(state) {

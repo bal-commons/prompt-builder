@@ -5,10 +5,10 @@ import {architectureSvg} from "../diagram.js";
 import {seedFile} from "../identity.js";
 import {enabledServices, integrationsOf, managedIntegrations, newIntegrations, workflowsOf} from "../state.js";
 import {h} from "./dom.js";
-import {connectionStatus, connectionTargets, STATUS_TEXT, technicalSettings} from "./steps.js";
+import {connectionStatus, connectionTargets, STATUS_TEXT, STEPS, stepOf, technicalSettings} from "./steps.js";
 import {change, exportConfig, importConfig, setView, store} from "./store.js";
 
-const edit = (step) => h("button", {type: "button", class: "link", onclick: () => setView({step}, "structure")}, "Edit");
+const edit = (id) => h("button", {type: "button", class: "link", onclick: () => setView({step: stepOf(id)}, "structure")}, "Edit");
 
 function block(title, step, ...body) {
   return h("section", {class: "summary"}, h("div", {class: "summary-head"}, h("h3", {}, title), edit(step)), ...body);
@@ -47,28 +47,28 @@ export function reviewStep() {
     blockers.length
       ? h("div", {class: "banner blocker", role: "alert"}, h("strong", {}, `${blockers.length} thing${blockers.length > 1 ? "s" : ""} to fix before generating. `), "The list below links to each.")
       : h("div", {class: "banner ok", role: "status"}, h("strong", {}, "Ready to generate. "), warnings.length ? `${warnings.length} optional suggestion${warnings.length > 1 ? "s" : ""} below.` : "No issues found."),
-    block("Your app", 1, h("p", {}, h("strong", {}, st.app.name), st.app.description ? ` · ${st.app.description}` : "")),
-    block("Identity", 2, h("p", {}, `${idp.name} · ${st.identity.users.length} users · roles ${st.identity.roles.join(", ")}${st.identity.adminRoles.length ? ` (admins: ${st.identity.adminRoles.join(", ")})` : ""}`),
+    block("Your app", "describe", h("p", {}, h("strong", {}, st.app.name), st.app.description ? ` · ${st.app.description}` : "")),
+    block("Identity", "identity", h("p", {}, `${idp.name} · ${st.identity.users.length} users · roles ${st.identity.roles.join(", ")}${st.identity.adminRoles.length ? ` (admins: ${st.identity.adminRoles.join(", ")})` : ""}`),
       h("p", {class: "small"}, `Claims: user ${st.identity.idp.userIdClaim}, roles ${st.identity.idp.rolesClaim}.${seedFile(st) ? ` Seed file: ${seedFile(st)[0]}.` : ""}`)),
-    block("Architecture", 3, h("div", {class: "diagram", html: architectureSvg(st)}),
+    block("Architecture", "architecture", h("div", {class: "diagram", html: architectureSvg(st)}),
       h("ul", {}, integrationsOf(st).map((int) => h("li", {}, h("strong", {}, int.title), ` · ${int.source === "new" ? `new package ${int.pkg}` : `existing ${int.pkg}`}: `,
         int.workflows.map((w) => `${wfNames(w).display} (${w.kind}${(w.tasks ?? []).length ? `, ${(w.tasks ?? []).length} task${(w.tasks ?? []).length === 1 ? "" : "s"}` : ""}${w.approval?.on ? ", approval" : ""})`).join(", ") || "no workflows"))),
       services.length ? h("p", {class: "small"}, `Shared commons services: ${services.join(", ")}. Management APIs: ${managedIntegrations(st).map((i) => i.title).join(", ") || "none"}.`) : null),
-    block("Capabilities", 4, h("ul", {class: "tick"}, CAPABILITIES.map((c) => h("li", {class: st.capabilities[c.id] ? "yes" : "no"}, c.name, st.capabilities[c.id] ? "" : " (off)")))),
-    block("Behavior", 5, h("ul", {},
+    block("Capabilities", "capabilities", h("ul", {class: "tick"}, CAPABILITIES.map((c) => h("li", {class: st.capabilities[c.id] ? "yes" : "no"}, c.name, st.capabilities[c.id] ? "" : " (off)")))),
+    block("Behavior", "behavior", h("ul", {},
       st.capabilities.tasks ? h("li", {}, `Human tasks: ${[st.behavior.tasks.inbox ? "a Tasks page with every task" : "", st.behavior.tasks.typePages.length ? `${st.behavior.tasks.typePages.length} page${st.behavior.tasks.typePages.length === 1 ? "" : "s"} for one kind of task` : ""].filter(Boolean).join(" and ") || "no task pages"}`) : null,
       st.capabilities.uploads ? h("li", {}, `Upload slots: ${st.behavior.uploads.slots.map((s) => `${s.label}${s.required ? "" : " (optional)"}`).join(", ")}`) : null,
       st.capabilities.notifications ? h("li", {}, `Notifications: bell opens ${st.bell.opens === "drawer" ? "a drawer" : "the Notifications page"}; notify on ${Object.entries(st.behavior.notifications.events).filter(([, v]) => v).map(([k]) => ({runStarted: "run started", taskAssigned: "task assigned", runFinished: "run finished"})[k]).join(", ") || "nothing"}`) : null)),
-    block("Portal", 6, h("p", {}, `Login screen, then ${LAYOUTS.find((l) => l.id === st.layout.shell).name.toLowerCase()} · ${st.layout.auto ? "suggested layout" : "your layout"}`),
+    block("Portal", "portal", h("p", {}, `Login screen, then ${LAYOUTS.find((l) => l.id === st.layout.shell).name.toLowerCase()} · ${st.layout.auto ? "suggested layout" : "your layout"}`),
       h("ul", {}, st.pages.map((p) => h("li", {}, h("strong", {}, p.title), ` · ${p.layout === "split" ? `two columns ${p.ratio}/${100 - p.ratio}` : "one column"}: ${[...p.columns[0], ...p.columns[1]].length} components`)))),
-    block("Connections", 3,
+    block("Connections", "architecture",
       h("ul", {}, targets.map(([key, , , , label]) => h("li", {}, `${label}: `, h("span", {class: `status ${connectionStatus(key)}`}, STATUS_TEXT[connectionStatus(key)])))),
       mocked.length ? h("p", {class: "small"}, `Mocked in the preview: ${mocked.join(", ")}. The generated code always talks to the real services.`) : null),
     h("section", {class: "summary"}, h("h3", {}, "Developers must supply"), h("ul", {}, toSupply(st).map((t) => h("li", {}, t)))),
     issues.length ? h("section", {class: "summary"}, h("h3", {}, "Issues"),
       h("ul", {class: "issues"}, [...blockers, ...warnings].map((i) => h("li", {class: i.level},
         h("span", {class: "issue-level"}, i.level === "blocker" ? "Fix before generating" : "Suggestion"), " ", i.text, " ", fix(i),
-        h("button", {type: "button", class: "link", onclick: () => setView({step: i.step}, "structure")}, `Go to step ${i.step}`))))) : null,
+        h("button", {type: "button", class: "link", onclick: () => setView({step: stepOf(i.step)}, "structure")}, `Go to ${STEPS[stepOf(i.step) - 1].short}`))))) : null,
     h("section", {class: "summary"}, h("h3", {}, "Outputs"), technicalSettings(),
       h("p", {class: "small"}, `The starter has ${generated.length} files across ${new Set(generated.map((p) => p.split("/").slice(0, 2).join("/"))).size} folders (${[...new Set(generated.map((p) => p.split("/").slice(0, p.startsWith("backend/") ? 2 : 1).join("/")))].join(", ")}), PROMPTS.md and a README.`),
       h("div", {class: "actions"},

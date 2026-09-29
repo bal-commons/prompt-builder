@@ -16,10 +16,17 @@ async function fresh(viewport = {width: 1440, height: 950}) {
   return page;
 }
 const frame = (page) => page.frameLocator("iframe.preview-frame");
-// The preview opens on the app's login screen: sign in as the first (or a named) user.
-const signIn = async (page, name) => {
+// The preview opens on the app's login screen: sign in with a username and its development password.
+const signIn = async (page, username = "alex") => {
   const f = frame(page);
-  await f.locator(name ? `.login-user:has-text("${name}")` : ".login-user").first().click(); await page.waitForTimeout(800);
+  await f.getByLabel("Username").fill(username); await f.getByLabel("Password").fill(`${username}-change-me`);
+  await f.getByRole("button", {name: "Sign in"}).click(); await page.waitForTimeout(800);
+};
+// Describe asks which features the app includes; the old scenarios map to these.
+const FEATURES = {assistant: ["AI assistant", "Notifications", "Tracking"], approval: ["Human approvals", "Notifications", "Tracking"],
+  documents: ["AI assistant", "Document collection", "Notifications", "Tracking"]};
+const features = async (page, which) => {
+  for (const name of FEATURES[which]) { await page.locator("label.feature", {hasText: name}).locator("input").check(); await page.waitForTimeout(250); }
 };
 const step = (page, name) => page.locator(".step-button", {hasText: name}).click().then(() => page.waitForTimeout(350));
 const cont = (page) => page.locator(".step-nav button.primary").click();
@@ -28,10 +35,10 @@ const toast = (page) => page.locator("#toast").innerText().catch(() => "");
 // 1. AI chat portal with optional uploads and notifications.
 try {
   const page = await fresh();
-  await page.getByRole("radio", {name: /AI assistant/}).click(); await page.waitForTimeout(400);
+  check("1 describe is full width", !(await page.locator("iframe.preview-frame").isVisible()));
+  await features(page, "assistant");
   await cont(page); await page.waitForTimeout(300);
-  check("1 identity comes second", (await page.locator("#step-heading").innerText()) === "Identity and sign-in");
-  await cont(page); await page.waitForTimeout(300);
+  check("1 architecture comes second", (await page.locator("#step-heading").innerText()) === "Design the architecture");
   await page.getByLabel("Greeting").fill("Welcome! Ask me anything."); await page.getByLabel("Greeting").blur();
   check("1 architecture shows the diagram", (await page.locator(".diagram svg").count()) === 1);
   await cont(page); await page.waitForTimeout(300);
@@ -40,6 +47,8 @@ try {
   check("1 uploads explains what it added", /Uploads add upload slots/.test(await toast(page)), await toast(page));
   await cont(page); await page.waitForTimeout(300);
   await cont(page); await page.waitForTimeout(300);
+  await cont(page); await page.waitForTimeout(300);
+  check("1 identity comes after the portal", (await page.locator("#step-heading").innerText()) === "Identity and sign-in");
   await cont(page); await page.waitForTimeout(500);
   check("1 review is ready", /Ready to generate/.test(await page.locator(".banner").first().innerText()));
   const f = frame(page);
@@ -74,7 +83,7 @@ catch (e) { check('1 (stopped)', false, e.message.split('\n')[0]); }
 // 2. Reviewer portal: task inbox + form; field changes reach preview and output.
 try {
   const page = await fresh();
-  await page.getByRole("radio", {name: /Approval portal/}).click(); await page.waitForTimeout(400);
+  await features(page, "approval");
   await step(page, "Architecture");
   const answers = page.getByRole("group", {name: /Task 1 answer fields/});
   await answers.getByRole("button", {name: "+ Add a field"}).click(); await page.waitForTimeout(200);
@@ -111,7 +120,7 @@ catch (e) { check('2 (stopped)', false, e.message.split('\n')[0]); }
 // 3. Mock mode without a backend; mixed mock/live is explicit.
 try {
   const page = await fresh();
-  await page.getByRole("radio", {name: /AI assistant/}).click(); await page.waitForTimeout(400);
+  await features(page, "assistant");
   await step(page, "Architecture");
   check("3 every backend starts as Mock", (await page.locator(".conn input[value=mock]").evaluateAll((els) => els.every((e) => e.checked))));
   const commons = page.locator(".conn", {hasText: "Commons services"});
@@ -137,7 +146,7 @@ catch (e) { check('3 (stopped)', false, e.message.split('\n')[0]); }
 // 4. Back navigation, capability changes, reloads and share links preserve configuration.
 try {
   const page = await fresh();
-  await page.getByRole("radio", {name: /Document collection/}).click(); await page.waitForTimeout(400);
+  await features(page, "documents");
   await page.locator(".step-button", {hasText: "Behavior"}).click(); await page.waitForTimeout(300);
   await page.getByLabel("Slot 1 label").fill("Passport"); await page.getByLabel("Slot 1 label").blur(); await page.waitForTimeout(300);
   await page.locator(".step-button", {hasText: "Capabilities"}).click(); await page.waitForTimeout(300);
@@ -173,7 +182,8 @@ catch (e) { check('4 (stopped)', false, e.message.split('\n')[0]); }
 // 5. Outputs include required dependencies and omit unused services.
 try {
   const page = await fresh();
-  await page.getByRole("radio", {name: /Approval portal/}).click(); await page.waitForTimeout(400);
+  await features(page, "approval");
+  await step(page, "Architecture");
   await page.click("#tab-code"); await page.waitForTimeout(300);
   const names = await page.locator(".files button").allInnerTexts();
   await page.locator(".files button", {hasText: "backend/main_app/Ballerina.toml"}).click();
@@ -192,18 +202,20 @@ catch (e) { check('5 (stopped)', false, e.message.split('\n')[0]); }
 try {
   const page = await fresh({width: 390, height: 820});
   check("6 no horizontal scroll at 390px", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));
-  check("6 configure/preview switch is shown", await page.getByRole("button", {name: "Preview", exact: true}).first().isVisible());
+  check("6 describe hides the preview switch (full width)", !(await page.locator(".pane-switch").isVisible()));
   await page.keyboard.press("Tab"); // skip link
   let reached = false;
   for (let i = 0; i < 40 && !reached; i++) {
     await page.keyboard.press("Tab");
-    reached = await page.evaluate(() => /AI assistant/.test(document.activeElement?.textContent ?? ""));
+    reached = await page.evaluate(() => /AI assistant/.test(document.activeElement?.closest("label")?.textContent ?? ""));
   }
-  check("6 scenario cards are reachable with Tab", reached);
-  await page.keyboard.press("Enter"); await page.waitForTimeout(400);
-  check("6 Enter chooses a scenario", /Assistant portal/.test(await page.getByLabel("Name").inputValue()));
+  check("6 features are reachable with Tab", reached);
+  await page.keyboard.press("Space"); await page.waitForTimeout(400);
+  check("6 Space includes a feature", await page.locator("label.feature", {hasText: "AI assistant"}).locator("input").isChecked());
   const outline = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
   check("6 focus is visible", outline !== "none", outline);
+  await step(page, "Architecture");
+  check("6 configure/preview switch is shown", await page.locator(".pane-switch").isVisible());
   await page.locator(".pane-switch button", {hasText: "Preview"}).click(); await page.waitForTimeout(1500);
   check("6 preview pane shows on narrow screens", await page.locator("iframe.preview-frame").isVisible());
   await page.screenshot({path: S + "/acc6.png"});
@@ -211,24 +223,42 @@ try {
 }
 
 catch (e) { check('6 (stopped)', false, e.message.split('\n')[0]); }
-// 7. Identity: a provider, a new user, the seed file and the login screen.
+// 7. Identity: a provider, users wired to roles and roles to what they can do, the seed file and the login screen.
 try {
   const page = await fresh();
-  await page.getByRole("radio", {name: /Approval portal/}).click(); await page.waitForTimeout(400);
+  await features(page, "approval");
   await step(page, "Identity");
+  check("7 identity is full width", !(await page.locator("iframe.preview-frame").isVisible()));
   await page.getByRole("radio", {name: /Keycloak/}).check(); await page.waitForTimeout(300);
   await page.getByRole("button", {name: "+ Add a user"}).click(); await page.waitForTimeout(300);
-  await page.getByLabel("User 3 username").fill("riley"); await page.getByLabel("User 3 username").blur(); await page.waitForTimeout(300);
-  await page.getByLabel("Title").first().fill("Approvals"); await page.getByLabel("Title").first().blur(); await page.waitForTimeout(600);
-  const f = frame(page);
-  check("7 login screen shows the provider and title", /Sign in with Keycloak/.test(await f.locator(".login-card").innerText()) && /Approvals/.test(await f.locator(".login-card h1").innerText()));
+  await page.locator(".node", {hasText: "User 3"}).click(); await page.waitForTimeout(300);
+  await page.locator("#user-username").fill("riley"); await page.locator("#user-username").blur(); await page.waitForTimeout(300);
+  // Click to link: the selected user, then a role.
+  await page.locator(".node", {hasText: /^Admin$/}).click(); await page.waitForTimeout(300);
+  // Drag to link: from the User role's dot to "Start Approval".
+  const port = await page.locator('[data-port="role:User"].right').boundingBox();
+  const target = await page.locator(".node", {hasText: "Start Approval"}).boundingBox();
+  await page.mouse.move(port.x + 5, port.y + 5); await page.mouse.down();
+  await page.mouse.move(target.x + 30, target.y + 10, {steps: 8}); await page.mouse.up(); await page.waitForTimeout(400);
+  check("7 the board draws the links", (await page.locator("svg.wires path").count()) >= 4);
+  await page.getByLabel("Title").first().fill("Approvals"); await page.getByLabel("Title").first().blur(); await page.waitForTimeout(300);
+  await step(page, "Review");
   await page.click("#tab-code"); await page.waitForTimeout(300);
   await page.locator(".files button", {hasText: "identity/realm.json"}).click();
   const realm = JSON.parse(await page.locator(".file-view pre").innerText());
-  check("7 the realm seed has the roles, the users and a PKCE client", realm.roles.realm.some((r) => r.name === "Reviewer") && realm.users.some((u) => u.username === "riley")
+  check("7 the realm seed has the roles, the users and a PKCE client", realm.users.some((u) => u.username === "riley" && u.realmRoles.includes("Admin"))
     && realm.clients[0].publicClient && realm.clients[0].attributes["pkce.code.challenge.method"] === "S256");
+  await page.locator(".files button", {hasText: "backend/main_app/start.bal"}).click();
+  check("7 the start service enforces the start role", /holdsAnyRole\(caller, \["User"\]\)/.test(await page.locator(".file-view pre").innerText()));
   await page.locator(".files button", {hasText: "backend/main_app/Config.toml"}).click();
   check("7 the integration trusts the provider's tokens", /enableJwtAuth = true/.test(await page.locator(".file-view pre").innerText()));
+  await page.click("#tab-preview"); await page.waitForTimeout(1200);
+  const f = frame(page);
+  check("7 login screen shows the title and a password form", /Approvals/.test(await f.locator(".login-card h1").innerText()) && await f.getByLabel("Password").isVisible());
+  await f.getByLabel("Username").fill("riley"); await f.getByLabel("Password").fill("nope"); await f.getByRole("button", {name: "Sign in"}).click(); await page.waitForTimeout(300);
+  check("7 a wrong password is refused", /Wrong username or password/.test(await f.locator(".login-card").innerText()));
+  await signIn(page, "riley");
+  check("7 a role without the start grant can't start", /only User can start it/.test(await f.locator("body").innerText()));
   await page.context().close();
 }
 
@@ -236,14 +266,14 @@ catch (e) { check('7 (stopped)', false, e.message.split('\n')[0]); }
 // 8. An existing integration from its workflow.def.json: its tasks in the inbox and on a page of their own.
 try {
   const page = await fresh();
-  await page.getByRole("radio", {name: /Approval portal/}).click(); await page.waitForTimeout(400);
+  await features(page, "approval");
   await step(page, "Architecture");
   await page.locator("label.button", {hasText: "Import an existing integration"}).locator("input").setInputFiles(new URL("./fixtures/workflow.def.json", import.meta.url).pathname);
   await page.waitForTimeout(600);
   check("8 the import adds an existing integration", (await page.locator(".integration.existing").count()) === 1 && /Imported/.test(await toast(page)), await toast(page));
   check("8 the diagram shows it", /Expense approval/.test(await page.locator(".diagram").innerHTML()));
   const card = page.locator(".integration.existing");
-  await card.getByRole("group", {name: "Reviewers"}).first().getByLabel("Reviewer").check(); await page.waitForTimeout(300);
+  await card.getByRole("group", {name: "Reviewers"}).first().getByLabel("Admin").check(); await page.waitForTimeout(300);
   await step(page, "Behavior");
   await page.locator("label.check", {hasText: "Review expense"}).locator("input").check(); await page.waitForTimeout(600);
   const f = frame(page);

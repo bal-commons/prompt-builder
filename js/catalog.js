@@ -131,7 +131,7 @@ export const IDPS = [
     id: "none",
     name: "None (development)",
     license: "",
-    summary: "No sign-in. Services trust x-user-id / x-user-roles headers; the UI switches personas. Never deploy this.",
+    summary: "No identity provider. Services trust x-user-id / x-user-roles headers; the login form checks development passwords. Never deploy this.",
     defaults: {}
   },
   {
@@ -251,16 +251,18 @@ export const VERSIONS = {
 export const CAPABILITIES = [
   {
     id: "chat",
+    feature: "An AI assistant people chat with",
     name: "AI chat",
     summary: "A durable agent works with each user in a conversation: it answers, asks for details and acts.",
     example: "“Help me draft a refund request.”",
     adds: ["A start form that spawns the agent", "The conversation view", "Streamed agent replies and forms in the chat"],
     services: ["chat"],
     explainOn: "Chat adds the agent's start form and a conversation view; the agent joins each chat as its own participant.",
-    explainOff: "Chat removed: its components left the pages. The agent stays (it no longer opens a chat); delete it in step 3 if you don't need it."
+    explainOff: "Chat removed: its components left the pages. The agent stays (it no longer opens a chat); delete it in the Architecture step if you don't need it."
   },
   {
     id: "uploads",
+    feature: "Document collection: people upload files",
     name: "File uploads",
     summary: "People upload named files the workflow needs, then preview, replace and submit them.",
     example: "“Upload your ID and a proof of address.”",
@@ -272,6 +274,7 @@ export const CAPABILITIES = [
   },
   {
     id: "notifications",
+    feature: "Notifications about what happened",
     name: "Notifications",
     summary: "A bell with an unread count and an inbox of personal and role notifications, kept live.",
     example: "“RUN-1001 is waiting for your review.”",
@@ -282,16 +285,18 @@ export const CAPABILITIES = [
   },
   {
     id: "tasks",
+    feature: "Human approvals and tasks",
     name: "Human tasks",
     summary: "Workflows wait for people. A task inbox lists what is assigned to the user; each task opens a form generated from its fields.",
     example: "“Review the expense and choose a cost centre.”",
     adds: ["A reviewer workflow with a task form", "A Tasks page: task inbox and task form"],
     services: ["workflow"],
     explainOn: "Human tasks add a reviewer workflow and a Tasks page with the task inbox and the task form.",
-    explainOff: "Human tasks removed: the Tasks page left the portal. The workflow stays; delete it in step 3 if you don't need it."
+    explainOff: "Human tasks removed: the Tasks page left the portal. The workflow stays; delete it in the Architecture step if you don't need it."
   },
   {
     id: "runs",
+    feature: "Tracking what people started",
     name: "Run tracking",
     summary: "Users see the workflows and agents they started, with their status; selecting one opens its chat or tasks.",
     example: "“RUN-1002 · Running”",

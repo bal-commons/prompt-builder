@@ -43,7 +43,9 @@ export const variants = {
     agent.approval = {on: true, activity: "closeCase", userRoles: ["Officer"], adminRoles: ["Officer"]};
     agent.input.push({name: "type", label: "Type", type: "choice", options: ["Bug", "R&D"], required: true},
       {name: "from", label: "From", type: "string", required: false}, {name: "count", label: "Count", type: "integer", required: true});
+    agent.startRoles = ["Applicant"];
     const flow = workflowsOf(s).find((w) => w.kind === "workflow");
+    flow.startRoles = ["Applicant", "Officer"];
     flow.tasks.push({name: "pay", title: "Pay it", description: "Finance pays", roles: ["Officer", "Applicant"],
       fields: [{name: "costCentre", label: "Cost centre", type: "choice", options: ["OPS", "SALES"], required: true},
         {name: "amount", label: "Amount", type: "number", required: true}]});

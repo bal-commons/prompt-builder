@@ -29,22 +29,27 @@ A persistent step bar with seven steps; each step has Back and Continue. The pre
 desktop, and behind a Configure / Preview switch on narrow screens. The builder designs an ecosystem, not one app:
 who signs in, which backends exist, and only then what the portal shows.
 
-1. **Describe your app.** Name, purpose and a template (AI assistant, approval portal, document collection,
-   custom). A template sets capabilities and an editable integration.
-2. **Identity and sign-in.** The identity provider, the login screen, roles and admin roles, the initial users and
-   their roles, and the claims (user ID, roles, audience). The starter carries a seed file the provider loads.
-3. **Design the architecture.** A diagram of the portal, the identity provider, the integrations and the commons
+1. **Describe your app.** Name, purpose and the features to include. A first-level filter: each feature turns on its
+   capability; the details come later. Full width.
+2. **Design the architecture.** A diagram of the portal, the identity provider, the integrations and the commons
    services. Each new integration is a Ballerina package with its workflows, agents, human tasks and approvals.
    An existing one is imported from its `workflow.def.json`; the user adds the reviewer roles. Mock or live per
    backend, with a read-only connection test.
-4. **Choose capabilities.** Cards for AI chat, file uploads, notifications, human tasks and run tracking. A
-   capability that needs a workflow or agent adds one to the first new integration.
-5. **Configure behavior.** Human tasks as one Tasks page (an inbox per integration with tasks) and/or a page per task
+3. **Choose capabilities.** Cards for AI chat, file uploads, notifications, human tasks and run tracking, with an
+   example and what each adds. A capability that needs a workflow or agent adds one to the first new integration.
+4. **Configure behavior.** Human tasks as one Tasks page (an inbox per integration with tasks) and/or a page per task
    type (an inbox filtered by the qualified task name `<workflow>.<task>`), upload slots, and notifications.
-6. **Arrange your portal.** Navigation style and pages. The layout is composed from the capabilities until you edit
+5. **Arrange your portal.** Navigation style and pages. The layout is composed from the capabilities until you edit
    it; after that, capability changes add or remove components in place.
+6. **Identity and sign-in.** The identity provider, and a three-column board: users, roles, and grants (see
+   everyone's runs, start a workflow or agent, complete a human task, approve an agent's action). Links are made by
+   dragging between dots or by selecting and clicking. The login screen is a username and password form, with an
+   optional quick sign-in for demos. The starter carries a seed file the provider loads. Full width.
 7. **Review and generate.** A summary with an Edit link per decision, the technical settings, what developers must
    supply, blockers versus suggestions, and the outputs.
+
+Identity comes after the portal because what a role may do refers to the workflows, tasks and approvals designed
+before it. Diagnostics name their step by ID (`describe`, `architecture`, …), so the order can change.
 
 "Advanced" (in the header) shows every step's settings on one page, over the same configuration.
 
@@ -56,8 +61,8 @@ connection test results are editor state and never enter share links or exports.
 | Key | Holds |
 |---|---|
 | `app` | Name and purpose |
-| `identity` | `idp` (kind, endpoints, client, claims, audience), `roles`, `adminRoles`, `users` (username, name, email, roles), `login` (title, subtitle) |
-| `architecture.integrations` | Per integration: `id`, `source` (`new` or `existing`), title, org, package, run ID prefix, and its `workflows` (agents and workflows; imported ones keep `fixedName`s from the descriptor) |
+| `identity` | `idp` (kind, endpoints, client, claims, audience), `roles`, `adminRoles`, `users` (username, name, email, roles), `login` (title, subtitle, `quick`) |
+| `architecture.integrations` | Per integration: `id`, `source` (`new` or `existing`), title, org, package, run ID prefix, and its `workflows` (agents and workflows with `startRoles`, task `roles`, approval `userRoles`; imported ones keep `fixedName`s from the descriptor) |
 | `capabilities` | `chat`, `uploads`, `notifications`, `tasks`, `runs` flags |
 | `behavior` | `uploads.slots`, `notifications` (scope, events), `tasks` (`inbox`, `typePages`: `<integration>:<workflow>.<task>` refs) |
 | `layout`, `header`, `bell`, `pages`, `custom` | The portal; `layout.auto` says whether pages follow the capabilities. Component IDs `start:<workflow>` and `task-inbox@<ref>` are parameterized |
@@ -104,7 +109,8 @@ configuration, marked "sample", and kept in `sessionStorage` so a preview reload
 |---|---|
 | Seven-step wizard, step bar with blocker counts, Back and Continue, Advanced mode | Done |
 | Templates, capabilities with dependencies, explanations and Undo | Done |
-| Identity step: provider, login screen, roles, users, claims; Keycloak and Thunder seed files | Done; the seed files aren't yet loaded into a running Keycloak or Thunder by the checks |
+| Describe as a feature checklist; identity after the portal; full-width Describe and Identity | Done |
+| Identity step: provider, users → roles → grants board (drag or click), start roles enforced by the start service, username and password login with optional quick sign-in, claims; Keycloak and Thunder seed files | Done; the seed files aren't yet loaded into a running Keycloak or Thunder by the checks |
 | Architecture step: diagram, new and imported integrations, one package each plus a commons package | Done; every variant compiles |
 | Human tasks as one inbox per integration and pages per task type | Done |
 | Interactive preview with a login screen, users from the identity step, multi-integration mocks, simulated agent | Done |

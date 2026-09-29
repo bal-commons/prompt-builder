@@ -9,13 +9,14 @@ import {boot, change, onChange, openHash, restoreDraft, setView, store, undo} fr
 // The builder's shell: the step bar, the current step (or every step in Advanced mode), the banner, the toast and
 // the output panel. The steps and outputs live in js/ui/.
 
-const BODIES = {1: describeStep, 2: identityStep, 3: architectureStep, 4: capabilitiesStep, 5: behaviorStep, 6: portalStep, 7: reviewStep};
+const BODIES = {describe: describeStep, architecture: architectureStep, capabilities: capabilitiesStep, behavior: behaviorStep,
+  portal: portalStep, identity: identityStep, review: reviewStep};
 
 function renderSteps() {
   const issues = diagnostics(store.state);
   const v = store.view;
   $("steps").replaceChildren(h("ol", {}, STEPS.map((step) => {
-    const blockers = issues.filter((i) => i.step === step.n && i.level === "blocker").length;
+    const blockers = issues.filter((i) => i.step === step.id && i.level === "blocker").length;
     const current = v.mode === "guided" && v.step === step.n;
     return h("li", {}, h("button", {type: "button", class: "step-button" + (current ? " current" : "") + (step.n < v.step ? " done" : ""),
       "aria-current": current ? "step" : undefined, onclick: () => go(step.n)},
@@ -40,15 +41,15 @@ function renderForm() {
   if (v.mode === "advanced") {
     form.replaceChildren(h("h2", {id: "step-heading", tabindex: "-1"}, "All settings"),
       h("p", {class: "note"}, "Every step on one page, over the same design. Switch back to Guided for the step-by-step flow."),
-      ...STEPS.map((step) => h("section", {class: "adv-step"}, h("h2", {class: "adv-title"}, `${step.n}. ${step.title}`), ...BODIES[step.n]().filter(Boolean))));
+      ...STEPS.map((step) => h("section", {class: "adv-step"}, h("h2", {class: "adv-title"}, `${step.n}. ${step.title}`), ...BODIES[step.id]().filter(Boolean))));
     form.querySelectorAll("details.advanced").forEach((d) => { d.open = true; });
   } else {
     const step = STEPS.find((x) => x.n === v.step);
-    const blockers = diagnostics(store.state).filter((i) => i.step === step.n && i.level === "blocker").length;
+    const blockers = diagnostics(store.state).filter((i) => i.step === step.id && i.level === "blocker").length;
     form.replaceChildren(
       h("p", {class: "step-count"}, `Step ${step.n} of ${STEPS.length}`),
       h("h2", {id: "step-heading", tabindex: "-1"}, step.title),
-      ...BODIES[step.n]().filter(Boolean),
+      ...BODIES[step.id]().filter(Boolean),
       h("div", {class: "step-nav"},
         step.n > 1 ? h("button", {type: "button", onclick: () => go(step.n - 1)}, "Back") : h("span"),
         step.n < STEPS.length ? h("button", {type: "button", class: "primary", onclick: () => {
@@ -96,6 +97,7 @@ function renderToast() {
 function renderChrome() {
   const v = store.view;
   document.body.dataset.show = v.pane;
+  document.body.dataset.wide = String(v.mode === "guided" && !!STEPS.find((x) => x.n === v.step)?.wide);
   for (const b of document.querySelectorAll("button[data-mode]")) b.setAttribute("aria-pressed", String(b.dataset.mode === v.mode));
   for (const b of document.querySelectorAll("button[data-pane]")) b.setAttribute("aria-pressed", String(b.dataset.pane === v.pane));
 }

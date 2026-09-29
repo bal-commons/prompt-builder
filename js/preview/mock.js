@@ -301,6 +301,8 @@ export class MockBackend {
     if (method === "POST" && parts[0] === "start" && parts[1]) {
       const wf = int.workflows.find((w) => wfNames(w).path === parts[1]);
       if (!wf) return fail(404, `No start service /start/${parts[1]}`);
+      const need = wf.startRoles ?? [];
+      if (need.length && !need.some((r) => roles.includes(r))) return fail(403, `Starting ${wfNames(wf).display} needs the role ${need.join(" or ")}`);
       const missing = this.missing(wf, body);
       if (missing.length) return fail(400, `Missing required field: ${missing.join(", ")}`);
       const run = this.createRun(int, wf, user, body ?? {});

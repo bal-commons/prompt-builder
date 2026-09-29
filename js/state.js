@@ -35,7 +35,8 @@ export function defaults() {
       roles,
       adminRoles: ["Admin"],
       users: usersFor(roles),
-      login: {title: "", subtitle: "Sign in to continue"}
+      // quick: one-click sign-in per initial user, a demo shortcut beside the username and password form.
+      login: {title: "", subtitle: "Sign in to continue", quick: false}
     },
     architecture: {integrations: [newIntegration([])]},
     capabilities: {chat: false, uploads: false, notifications: false, tasks: false, runs: false},
@@ -119,7 +120,7 @@ export function load(parsed) {
   if (parsed.version === 4 || parsed.version === 3) {
     return {state: migrate(parsed), notice: `This link was made with an older builder (version ${parsed.version}); it was upgraded. Check the identity and architecture steps.`};
   }
-  return {error: `This configuration is version ${parsed.version ?? "unknown"}; the builder opens versions 3 to 5. Start from a scenario instead.`};
+  return {error: `This configuration is version ${parsed.version ?? "unknown"}; the builder opens versions 3 to 5. Start fresh instead.`};
 }
 
 export function decode(hash) {
@@ -221,6 +222,36 @@ export function taskTypes(state) {
 // integrations keep the names in their descriptor; generated ones use the camel-cased names the code declares.
 export function qualifiedTaskName(wf, task) {
   return `${wf.fixedName ?? camel(wf.name || wf.title || "flow")}.${task.fixedName ?? camel(task.name || "task")}`;
+}
+
+// What a role can be allowed to do, grouped by integration. `get`/`set` read and write the roles that hold it;
+// `empty` says what no roles means.
+export function grants(state) {
+  const out = [{key: "admin", group: "The app", label: "See everyone's runs and files", empty: "nobody",
+    get: (s) => s.identity.adminRoles, set: (s, roles) => { s.identity.adminRoles = roles; }}];
+  for (const int of integrationsOf(state)) {
+    for (const wf of int.workflows) {
+      const at = (s) => findWorkflow(s, wf.id);
+      const name = wf.title || wf.name;
+      out.push({key: `start:${wf.id}`, group: int.title, label: `Start ${name}`, empty: "everyone",
+        get: (s) => at(s).startRoles ?? [], set: (s, roles) => { at(s).startRoles = roles; }});
+      (wf.tasks ?? []).forEach((t, j) => out.push({key: `task:${wf.id}:${j}`, group: int.title, label: `Complete "${t.title || t.name}"`,
+        detail: name, empty: "everyone", get: (s) => at(s).tasks[j].roles, set: (s, roles) => { at(s).tasks[j].roles = roles; }}));
+      if (wf.approval?.on) {
+        out.push({key: `approve:${wf.id}`, group: int.title, label: `Approve ${wf.approval.activity}`, detail: name, empty: "everyone",
+          get: (s) => at(s).approval.userRoles, set: (s, roles) => { at(s).approval.userRoles = roles; }});
+      }
+    }
+  }
+  return out;
+}
+
+// Renames a role everywhere it is used; an empty name removes it.
+export function renameRole(state, from, to) {
+  const swap = (roles) => [...new Set(roles.flatMap((r) => r === from ? (to ? [to] : []) : [r]))];
+  state.identity.roles = swap(state.identity.roles);
+  for (const u of state.identity.users) u.roles = swap(u.roles);
+  for (const g of grants(state)) g.set(state, swap(g.get(state)));
 }
 
 // ---------------------------------------------------------------- components

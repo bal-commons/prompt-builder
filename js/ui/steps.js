@@ -1,7 +1,7 @@
 import {ACTIVITIES, ASSISTANTS, CAPABILITIES, COMPONENTS, CONNECTIONS, componentSummary, DATABASES, DOCS, docUrl, FRAMEWORKS,
-  IDPS, LAYOUTS, SCENARIOS, SERVICES} from "../catalog.js";
+  IDPS, LAYOUTS, SERVICES} from "../catalog.js";
 import {wfNames} from "../code.js";
-import {applyScenario, compose, diagnostics, setCapability, syncTaskPages} from "../compose.js";
+import {compose, diagnostics, setCapability, syncTaskPages} from "../compose.js";
 import {fieldName} from "../contracts.js";
 import {importDescriptor} from "../descriptor.js";
 import {architectureSvg} from "../diagram.js";
@@ -9,25 +9,30 @@ import {claimMap, devPassword, seedFile} from "../identity.js";
 import {component, enabledServices, integrationOf, integrationsOf, managedIntegrations, newId, newIntegration, newWorkflow, taskTypes,
   workflowsOf} from "../state.js";
 import {advanced, checkbox, chips, h, list, radios, section, select, text, toggleIn} from "./dom.js";
+import {wiringBoard} from "./mapper.js";
 import {change, setView, store} from "./store.js";
 
+// `wide` steps use the full width: the preview panel is hidden while they're open.
 export const STEPS = [
-  {n: 1, title: "Describe your app", short: "Describe"},
-  {n: 2, title: "Identity and sign-in", short: "Identity"},
-  {n: 3, title: "Design the architecture", short: "Architecture"},
-  {n: 4, title: "Choose capabilities", short: "Capabilities"},
-  {n: 5, title: "Configure behavior", short: "Behavior"},
-  {n: 6, title: "Arrange your portal", short: "Portal"},
-  {n: 7, title: "Review and generate", short: "Review"}
+  {n: 1, id: "describe", title: "Describe your app", short: "Describe", wide: true},
+  {n: 2, id: "architecture", title: "Design the architecture", short: "Architecture"},
+  {n: 3, id: "capabilities", title: "Choose capabilities", short: "Capabilities"},
+  {n: 4, id: "behavior", title: "Configure behavior", short: "Behavior"},
+  {n: 5, id: "portal", title: "Arrange your portal", short: "Portal"},
+  {n: 6, id: "identity", title: "Identity and sign-in", short: "Identity", wide: true},
+  {n: 7, id: "review", title: "Review and generate", short: "Review"}
 ];
 
+// The step number of a diagnostic's step ID.
+export const stepOf = (id) => STEPS.find((x) => x.id === id)?.n ?? 1;
+
 const s = () => store.state;
-const issuesFor = (n) => diagnostics(s()).filter((i) => i.step === n);
+const issuesFor = (id) => diagnostics(s()).filter((i) => i.step === id);
 const wfAt = (x, id) => workflowsOf(x).find((w) => w.id === id);
 const intAt = (x, id) => integrationsOf(x).find((i) => i.id === id);
 
-function issueList(n) {
-  const issues = issuesFor(n);
+function issueList(id) {
+  const issues = issuesFor(id);
   if (!issues.length) return null;
   return h("ul", {class: "issues", "aria-label": "Things to check in this step"}, issues.map((i) => h("li", {class: i.level},
     h("span", {class: "issue-level"}, i.level === "blocker" ? "Fix before generating" : "Suggestion"), " ", i.text,
@@ -38,51 +43,33 @@ function issueList(n) {
 
 export function describeStep() {
   const st = s();
-  const blank = !workflowsOf(st).length && !Object.values(st.capabilities).some(Boolean);
   return [
-    section("Start from a template", "A template picks capabilities and fills in an integration you can change later. Custom starts empty.",
-      h("div", {class: "cards", role: "radiogroup", "aria-label": "Template"}, SCENARIOS.map((sc) => h("button", {
-        type: "button", class: "card-option" + (st.scenario === sc.id ? " current" : ""), role: "radio", "aria-checked": String(st.scenario === sc.id),
-        onclick: () => {
-          if (st.scenario === sc.id && !blank) return;
-          change(() => applyScenario(st, sc.id), {structural: true, undo: `start from ${sc.name}`,
-            message: `Started from ${sc.name}: ${sc.capabilities.length ? sc.capabilities.map((c) => CAPABILITIES.find((x) => x.id === c).name).join(", ") : "no capabilities yet"}.`});
-        }}, h("strong", {}, sc.name), h("span", {class: "desc"}, sc.desc))))),
     section("Your app", null,
       text("Name", () => st.app.name, (x, v) => { x.app.name = v; }, {required: true, error: st.app.name.trim() ? undefined : "Give the app a name."}),
       text("Purpose", () => st.app.description, (x, v) => { x.app.description = v; }, {multiline: true, optional: true,
         hint: "One or two sentences; the prompts use them to explain the app."})),
-    h("p", {class: "small"}, "Next: who signs in (Identity), then what runs behind the portal (Architecture): the integrations, their workflows, agents and human tasks."),
-    issueList(1)
+    section("What should it include?", "Pick the features; each one sets up what it needs. You fine-tune them later, in Capabilities and Behavior.",
+      h("div", {class: "features", role: "group", "aria-label": "Features"}, CAPABILITIES.map((cap) => {
+        const on = st.capabilities[cap.id];
+        return h("label", {class: "feature" + (on ? " on" : "")},
+          h("input", {type: "checkbox", checked: on, onchange: (e) => {
+            const result = setCapability(st, cap.id, e.target.checked);
+            change(() => result.state, {structural: true, undo: `${e.target.checked ? "include" : "leave out"} ${cap.name}`, message: result.message});
+          }}),
+          h("span", {}, h("strong", {}, cap.feature), h("span", {class: "desc"}, cap.example)));
+      }))),
+    h("p", {class: "small"}, "Next: what runs behind the portal (Architecture). Who signs in and what each role may do comes after the portal (Identity)."),
+    issueList("describe")
   ];
 }
 
-// ---------------------------------------------------------------- 2. identity
-
-function usersTable() {
-  const st = s();
-  const id = st.identity;
-  const at = (x, i) => x.identity.users[i];
-  return h("div", {class: "users", role: "group", "aria-label": "Initial users"},
-    id.users.length ? h("div", {class: "user-row head", "aria-hidden": "true"}, h("span", {}, "Username"), h("span", {}, "Name"), h("span", {}, "Email"), h("span")) : null,
-    ...id.users.map((u, i) => h("div", {class: "user-row"},
-      h("input", {type: "text", value: u.username, "aria-label": `User ${i + 1} username`, "aria-invalid": u.username.trim() ? undefined : "true",
-        oninput: (e) => change((x) => { at(x, i).username = e.target.value.trim(); })}),
-      h("input", {type: "text", value: u.name, "aria-label": `User ${i + 1} name`, oninput: (e) => change((x) => { at(x, i).name = e.target.value; })}),
-      h("input", {type: "email", value: u.email, "aria-label": `User ${i + 1} email`, oninput: (e) => change((x) => { at(x, i).email = e.target.value; })}),
-      chips(null, id.roles, u.roles, (x, v, on) => { at(x, i).roles = toggleIn(at(x, i).roles, v, on); }),
-      h("button", {type: "button", class: "icon", "aria-label": `Remove user ${u.username || i + 1}`,
-        onclick: () => change((x) => { x.identity.users.splice(i, 1); }, {structural: true, undo: `remove the user ${u.username}`})}, "✕"))),
-    h("button", {type: "button", class: "link", onclick: () => change((x) => {
-      const n = x.identity.users.length + 1;
-      x.identity.users.push({username: `user${n}`, name: `User ${n}`, email: `user${n}@example.com`, roles: x.identity.roles.slice(0, 1)});
-    }, {structural: true})}, "+ Add a user"));
-}
+// ---------------------------------------------------------------- identity
 
 // The roles the integrations' human tasks and approvals ask for, so the identity step can say which are missing.
 function referencedRoles(st) {
   const roles = new Set();
   for (const wf of workflowsOf(st)) {
+    (wf.startRoles ?? []).forEach((r) => roles.add(r));
     for (const t of wf.tasks ?? []) t.roles.forEach((r) => roles.add(r));
     if (wf.approval?.on) wf.approval.userRoles.forEach((r) => roles.add(r));
   }
@@ -99,7 +86,7 @@ export function identityStep() {
     section("Identity provider", "Who signs users in. Every backend (the integrations, their management APIs, the commons services) trusts the same tokens.",
       radios("idp", IDPS.map((i) => ({id: i.id, name: i.name, tag: i.license, desc: i.summary})), id.idp.kind,
         (x, v) => { x.identity.idp = {...x.identity.idp, kind: v, ...IDPS.find((i) => i.id === v).defaults}; }),
-      idp.id === "none" ? h("p", {class: "small"}, "Development only: the backends trust x-user-id / x-user-roles headers, and the login screen lists the users below.") : advanced(`${idp.name} endpoints and client`,
+      idp.id === "none" ? h("p", {class: "small"}, "Development only: the backends trust x-user-id / x-user-roles headers the portal sends for the signed-in user.") : advanced(`${idp.name} endpoints and client`,
         h("div", {class: "row"},
           text("Issuer", () => id.idp.issuer, (x, v) => { x.identity.idp.issuer = v; }),
           text("JWKS URL", () => id.idp.jwksUrl, (x, v) => { x.identity.idp.jwksUrl = v; })),
@@ -109,20 +96,20 @@ export function identityStep() {
         h("div", {class: "row"},
           text("Client ID", () => id.idp.clientId, (x, v) => { x.identity.idp.clientId = v; }, {hint: "A public client with PKCE; the seed file creates it."}),
           text("Scopes", () => id.idp.scopes, (x, v) => { x.identity.idp.scopes = v; })))),
-    section("Login screen", "The first screen of the portal.",
+    section("Users, roles and what they can do", "Connect each user to their roles, and each role to what it may do: start a workflow or agent, complete a human task, approve an agent's action, see everyone's runs. An item with no role is open to everyone (admin: to nobody).",
+      ...wiringBoard(st),
+      missing.length ? h("p", {class: "warning-note"}, `The integrations use roles that aren't defined here: ${missing.join(", ")}. `,
+        h("button", {type: "button", class: "link", onclick: () => change((x) => { x.identity.roles = [...x.identity.roles, ...missing]; }, {structural: true, message: `Added ${missing.join(", ")}.`})}, "Add them")) : null,
+      seed ? h("p", {class: "small"}, `The starter's ${seed[0]} creates these users and roles, with development passwords (e.g. ${devPassword(id.users[0] ?? {username: "alex"})}).`) : null),
+    section("Login screen", "The first screen of the portal: a username and password form.",
       h("div", {class: "row"},
         text("Title", () => id.login.title, (x, v) => { x.identity.login.title = v; }, {optional: true, placeholder: st.app.name, hint: "Empty uses the app's name."}),
-        text("Subtitle", () => id.login.subtitle, (x, v) => { x.identity.login.subtitle = v; }, {optional: true}))),
-    section("Roles", "What people can do. Human tasks and approvals are assigned to roles; the management API matches them against the token's roles claim.",
-      text("Roles", () => id.roles.join(", "), (x, v) => {
-        x.identity.roles = list(v);
-        x.identity.adminRoles = x.identity.adminRoles.filter((r) => x.identity.roles.includes(r));
-      }, {hint: "Comma separated, e.g. Employee, Reviewer.", error: id.roles.length ? undefined : "Add at least one role."}),
-      chips("Admins (see everyone's runs and files)", id.roles, id.adminRoles, (x, v, on) => { x.identity.adminRoles = toggleIn(x.identity.adminRoles, v, on); }),
-      missing.length ? h("p", {class: "warning-note"}, `The integrations assign tasks to roles that aren't defined here: ${missing.join(", ")}. `,
-        h("button", {type: "button", class: "link", onclick: () => change((x) => { x.identity.roles = [...x.identity.roles, ...missing]; }, {structural: true, message: `Added ${missing.join(", ")}.`})}, "Add them")) : null),
-    section("Initial users", `They sign in to the portal and the preview.${seed ? ` The starter's ${seed[0]} creates them with development passwords (e.g. ${devPassword(id.users[0] ?? {username: "alex"})}).` : ""}`,
-      usersTable()),
+        text("Subtitle", () => id.login.subtitle, (x, v) => { x.identity.login.subtitle = v; }, {optional: true})),
+      checkbox("Quick sign-in for demos: one button per initial user", id.login.quick, (x, v) => { x.identity.login.quick = v; },
+        {hint: idp.id === "none"
+          ? "Each button signs in as that user at once. Development only."
+          : `Each button starts the ${idp.name} sign-in with the username filled in (login_hint); the password is still asked.`}),
+      idp.id !== "none" ? h("p", {class: "small"}, `With ${idp.name}, the username and password form is ${idp.name}'s own sign-in page (the portal never sees the password).`) : null),
     section("Claims", `Where each backend reads the user and their roles in the access token.${idp.id === "none" ? " They apply once you choose an identity provider." : ""}`,
       h("div", {class: "row"},
         text("User ID claim", () => id.idp.userIdClaim, (x, v) => { x.identity.idp.userIdClaim = v; }),
@@ -130,11 +117,11 @@ export function identityStep() {
       text("Token audience (aud)", () => id.idp.audience, (x, v) => { x.identity.idp.audience = v; }, {optional: true,
         hint: "The workflow management APIs check it; empty uses the client ID."}),
       h("table", {class: "claims"}, h("tbody", {}, claimMap(st).map((c) => h("tr", {}, h("th", {}, c.backend), h("td", {}, h("code", {}, c.settings))))))),
-    issueList(2)
+    issueList("identity")
   ];
 }
 
-// ---------------------------------------------------------------- 3. architecture
+// ---------------------------------------------------------------- architecture
 
 const FIELD_TYPES = [["string", "Text"], ["text", "Long text"], ["number", "Number"], ["integer", "Whole number"],
   ["boolean", "Yes / no"], ["date", "Date"], ["choice", "Choice"]];
@@ -416,11 +403,11 @@ export function architectureStep() {
       h("p", {class: "small"}, "An existing integration's descriptor is packed in its JAR: ", h("code", {}, "unzip -p target/bin/<app>.jar workflow.def.json"),
         ". The portal reaches it through its management API: tasks, approvals, and starting its workflows.")),
     connectionsSection(),
-    issueList(3)
+    issueList("architecture")
   ];
 }
 
-// ---------------------------------------------------------------- 4. capabilities
+// ---------------------------------------------------------------- capabilities
 
 export function capabilitiesStep() {
   const st = s();
@@ -443,11 +430,11 @@ export function capabilitiesStep() {
         h("div", {class: "adds"}, h("span", {class: "small-label"}, "Adds"), h("ul", {}, cap.adds.map((a) => h("li", {}, a)))),
         cap.requires ? h("p", {class: "small"}, `Needs ${cap.requires.map((r) => CAPABILITIES.find((c) => c.id === r).name).join(", ")}; it's turned on with it.`) : null);
     })),
-    issueList(4)
+    issueList("capabilities")
   ];
 }
 
-// ---------------------------------------------------------------- 5. behavior
+// ---------------------------------------------------------------- behavior
 
 const TYPE_PRESETS = [["", "Any file"], ["image/*", "Images"], ["application/pdf", "PDF"], ["application/pdf,image/*", "Images or PDF"]];
 // Accepted types in a fixed order, so "image/*, application/pdf" matches its preset.
@@ -512,18 +499,18 @@ export function behaviorStep() {
   const c = st.capabilities;
   const out = [];
   if (!Object.values(c).some(Boolean)) {
-    out.push(h("p", {class: "empty-note"}, "Choose capabilities in step 4 first; their settings appear here. Workflows and agents are edited in the Architecture step."));
+    out.push(h("p", {class: "empty-note"}, "Choose capabilities first; their settings appear here. Workflows and agents are edited in the Architecture step."));
   }
   if (c.tasks) out.push(section("Human tasks", null, ...tasksEditor()));
   if (c.uploads) out.push(section("File uploads", null, ...uploadsEditor()));
   if (c.notifications) out.push(section("Notifications", null, ...notificationsEditor()));
   if (c.chat) out.push(section("AI chat", `The chat agents: ${workflowsOf(st).filter((w) => w.kind === "agent" && w.chat).map((w) => w.title).join(", ") || "none yet"}. Their greeting, process and activities are in the Architecture step.`));
   if (c.runs) out.push(section("Run tracking", "My runs lists what the signed-in user started in the new integrations, newest first, with the status the workflow or agent sets."));
-  out.push(issueList(5));
+  out.push(issueList("behavior"));
   return out;
 }
 
-// ---------------------------------------------------------------- 6. portal
+// ---------------------------------------------------------------- portal
 
 const label = (c) => c.name;
 
@@ -617,7 +604,7 @@ export function portalStep() {
   const st = s();
   const headerChoices = [...COMPONENTS.filter((c) => c.header), ...st.custom];
   return [
-    h("p", {class: "note"}, "The portal opens on the login screen (step 2); these are the pages behind it."),
+    h("p", {class: "note"}, "The portal opens on the login screen (set up in Identity); these are the pages behind it."),
     section("Navigation", null,
       radios("shell", LAYOUTS.map((l) => ({...l, undo: undefined})), st.layout.shell, (x, v) => { x.layout.shell = v; }),
       st.layout.shell === "sidebar" ? checkbox("The sidebar collapses to a rail", st.layout.collapsible, (x, v) => { x.layout.collapsible = v; }) : null,
@@ -659,7 +646,7 @@ export function portalStep() {
         customize(x);
         x.pages[0].columns[0].push(id);
       }, {structural: true, message: "Added a custom component to Home."})}, "+ Add a custom component")),
-    issueList(6)
+    issueList("portal")
   ];
 }
 

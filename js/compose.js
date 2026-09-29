@@ -231,7 +231,7 @@ export function syncTaskPages(state) {
 
 // ---------------------------------------------------------------- diagnostics
 
-// Problems in a design. level "blocker" stops generation; "warning" is a suggestion. `fix` returns a new state.
+// Problems in a design, by step ID. level "blocker" stops generation; "warning" is a suggestion. `fix` returns a new state.
 export function diagnostics(state) {
   const s = state;
   const issues = [];
@@ -240,53 +240,53 @@ export function diagnostics(state) {
   const allPlaced = new Set(usedComponents(s));
   const id = s.identity;
 
-  // 1. Describe
-  if (!s.app.name.trim()) add("blocker", 1, "The app has no name.");
-  // 2. Identity
-  if (!id.roles.length) add("blocker", 2, "Add at least one role: tasks, approvals and personas need roles.");
-  if (!id.users.length) add("blocker", 2, "Add at least one user: they sign in to the portal and the preview.");
+  // Describe
+  if (!s.app.name.trim()) add("blocker", "describe", "The app has no name.");
+  // Identity
+  if (!id.roles.length) add("blocker", "identity", "Add at least one role: tasks, approvals and personas need roles.");
+  if (!id.users.length) add("blocker", "identity", "Add at least one user: they sign in to the portal and the preview.");
   const usernames = id.users.map((u) => u.username.trim().toLowerCase());
   id.users.forEach((u, i) => {
-    if (!u.username.trim()) add("blocker", 2, `User ${i + 1} has no username.`);
-    else if (usernames.indexOf(usernames[i]) !== i) add("blocker", 2, `Two users are both called "${u.username}".`);
+    if (!u.username.trim()) add("blocker", "identity", `User ${i + 1} has no username.`);
+    else if (usernames.indexOf(usernames[i]) !== i) add("blocker", "identity", `Two users are both called "${u.username}".`);
     const unknown = u.roles.filter((r) => !id.roles.includes(r));
-    if (unknown.length) add("warning", 2, `${u.username} has roles that aren't defined: ${unknown.join(", ")}.`, "Remove them", (x) => {
+    if (unknown.length) add("warning", "identity", `${u.username} has roles that aren't defined: ${unknown.join(", ")}.`, "Remove them", (x) => {
       const r = clone(x);
       r.identity.users[i].roles = r.identity.users[i].roles.filter((ro) => r.identity.roles.includes(ro));
       return r;
     });
   });
-  for (const role of id.roles) if (!id.users.some((u) => u.roles.includes(role))) add("warning", 2, `Nobody has the role ${role}, so nobody can act as it.`);
+  for (const role of id.roles) if (!id.users.some((u) => u.roles.includes(role))) add("warning", "identity", `Nobody has the role ${role}, so nobody can act as it.`);
   const idp = IDPS.find((i) => i.id === id.idp.kind);
   if (idp.id !== "none") {
     for (const key of ["issuer", "jwksUrl", "authorizeUrl", "tokenUrl", "clientId", "userIdClaim", "rolesClaim"]) {
-      if (!String(id.idp[key] ?? "").trim()) add("blocker", 2, `Sign-in: ${key} is empty.`);
+      if (!String(id.idp[key] ?? "").trim()) add("blocker", "identity", `Sign-in: ${key} is empty.`);
     }
-    if (!id.idp.audience) add("warning", 2, "The management APIs check the token audience; the client ID is used because none is set.");
+    if (!id.idp.audience) add("warning", "identity", "The management APIs check the token audience; the client ID is used because none is set.");
   }
-  // 3. Architecture
+  // Architecture
   const pkgs = newIntegrations(s).map((i) => i.pkg.trim().toLowerCase());
   newIntegrations(s).forEach((int, i) => {
-    if (!/^[a-z][a-z0-9_]*$/.test(int.pkg)) add("blocker", 3, `${int.title}: the package name "${int.pkg}" must be lowercase letters, digits and underscores.`);
-    else if (pkgs.indexOf(pkgs[i]) !== i || int.pkg === "commons_services") add("blocker", 3, `Two packages would be called "${int.pkg}".`);
+    if (!/^[a-z][a-z0-9_]*$/.test(int.pkg)) add("blocker", "architecture", `${int.title}: the package name "${int.pkg}" must be lowercase letters, digits and underscores.`);
+    else if (pkgs.indexOf(pkgs[i]) !== i || int.pkg === "commons_services") add("blocker", "architecture", `Two packages would be called "${int.pkg}".`);
   });
   for (const int of integrationsOf(s)) {
     if (int.source === "existing" && s.connections[int.id]?.mode === "live" && !s.connections[int.id]?.mgmtUrl) {
-      add("warning", 3, `${int.title} is live but has no management API URL.`);
+      add("warning", "architecture", `${int.title} is live but has no management API URL.`);
     }
     for (const wf of int.workflows) {
-      checkFields(add, wf.input, `${wf.title || wf.name}: start input`, 3);
+      checkFields(add, wf.input, `${wf.title || wf.name}: start input`, "architecture");
       if (wf.kind === "workflow") {
-        if (!(wf.tasks ?? []).length && int.source === "new") add("warning", 3, `${wf.title || wf.name} has no human task; it finishes as soon as it starts.`);
+        if (!(wf.tasks ?? []).length && int.source === "new") add("warning", "architecture", `${wf.title || wf.name} has no human task; it finishes as soon as it starts.`);
         for (const t of wf.tasks ?? []) {
-          if (!t.fields.length) add("blocker", 3, `Task "${t.title || t.name}" has no answer fields; a person can't complete an empty form.`);
-          checkFields(add, t.fields, `Task "${t.title || t.name}"`, 3);
-          if (!t.roles.length) add("warning", 3, int.source === "existing"
+          if (!t.fields.length) add("blocker", "architecture", `Task "${t.title || t.name}" has no answer fields; a person can't complete an empty form.`);
+          checkFields(add, t.fields, `Task "${t.title || t.name}"`, "architecture");
+          if (!t.roles.length) add("warning", "architecture", int.source === "existing"
             ? `Task "${t.title || t.name}" (imported) has no reviewer role here; enter the roles ${int.title} assigns, so the preview routes it.`
             : `Task "${t.title || t.name}" has no reviewer role, so anyone can complete it.`);
         }
       } else if (wf.approval?.on && !wf.activities.includes(wf.approval.activity)) {
-        add("blocker", 3, `${wf.title}: the approval guards "${wf.approval.activity}", which isn't one of its activities.`, "Guard its first activity", (x) => {
+        add("blocker", "architecture", `${wf.title}: the approval guards "${wf.approval.activity}", which isn't one of its activities.`, "Guard its first activity", (x) => {
           const r = clone(x);
           const w = workflowsOf(r).find((y) => y.id === wf.id);
           w.approval.activity = w.activities[0] ?? "";
@@ -297,11 +297,11 @@ export function diagnostics(state) {
     }
     const names = int.workflows.map((w) => w.name.trim().toLowerCase());
     names.forEach((n, i) => {
-      if (!n) add("blocker", 3, `A ${int.workflows[i].kind} in ${int.title} has no code name.`);
-      else if (names.indexOf(n) !== i) add("blocker", 3, `${int.title} has two workflows or agents called "${n}".`);
+      if (!n) add("blocker", "architecture", `A ${int.workflows[i].kind} in ${int.title} has no code name.`);
+      else if (names.indexOf(n) !== i) add("blocker", "architecture", `${int.title} has two workflows or agents called "${n}".`);
     });
   }
-  // 4 and 5. Capabilities and behavior
+  // Capabilities and behavior
   for (const cap of CAPABILITIES) {
     if (!s.capabilities[cap.id]) continue;
     const missing = {
@@ -313,7 +313,7 @@ export function diagnostics(state) {
       notifications: !s.header.includes("bell") && !allPlaced.has("inbox") && s.layout.shell !== "hub" ? "Neither the bell nor the notification inbox is in the portal." : ""
     }[cap.id];
     if (missing) {
-      add("warning", 4, `${cap.name}: ${missing}`, "Add it", (x) => {
+      add("warning", "capabilities", `${cap.name}: ${missing}`, "Add it", (x) => {
         const r = clone(x);
         ensure(r, cap.id);
         return r.layout.auto ? compose(r) : place(r);
@@ -321,7 +321,7 @@ export function diagnostics(state) {
     }
   }
   if (s.capabilities.tasks && !s.behavior.tasks.inbox && !s.behavior.tasks.typePages.length) {
-    add("warning", 5, "Human tasks: choose the task inbox or at least one task page.", "Use the task inbox", (x) => {
+    add("warning", "behavior", "Human tasks: choose the task inbox or at least one task page.", "Use the task inbox", (x) => {
       const r = clone(x);
       r.behavior.tasks.inbox = true;
       return syncTaskPages(r);
@@ -332,13 +332,13 @@ export function diagnostics(state) {
     const stray = ids.filter((c) => allPlaced.has(c) && !(s.layout.shell === "hub" && Object.values(HUB_PANES).flat().includes(c)));
     if (stray.length) {
       const name = CAPABILITIES.find((c) => c.id === cap).name;
-      add("warning", 6, `${stray.map((c) => component(s, c).name).join(", ")} ${stray.length > 1 ? "are" : "is"} on a page, but ${name} is off.`,
+      add("warning", "portal", `${stray.map((c) => component(s, c).name).join(", ")} ${stray.length > 1 ? "are" : "is"} on a page, but ${name} is off.`,
         `Turn ${name} on`, (x) => setCapability(x, cap, true).state);
     }
   }
-  // 6. Portal
+  // Portal
   if (on.has("task-form") && ![...on].some((c) => c === "task-inbox" || c.startsWith("task-inbox@"))) {
-    add("warning", 6, "A page shows the task form without a task inbox, so nothing selects a task.", "Add the inbox next to it", (x) => {
+    add("warning", "portal", "A page shows the task form without a task inbox, so nothing selects a task.", "Add the inbox next to it", (x) => {
       const r = clone(x);
       const p = r.pages.find((pg) => [...pg.columns[0], ...pg.columns[1]].includes("task-form"));
       p.columns[0].unshift("task-inbox");
@@ -346,7 +346,7 @@ export function diagnostics(state) {
     });
   }
   for (const c of [...on].filter((x) => x.startsWith("task-inbox@") || x.startsWith("start:"))) {
-    if (!component(s, c)) add("blocker", 6, `A page shows a component whose workflow or task was removed (${c}).`, "Remove it", (x) => {
+    if (!component(s, c)) add("blocker", "portal", `A page shows a component whose workflow or task was removed (${c}).`, "Remove it", (x) => {
       const r = clone(x);
       for (const p of r.pages) p.columns = p.columns.map((col) => col.filter((y) => y !== c));
       return r;
@@ -354,7 +354,7 @@ export function diagnostics(state) {
   }
   for (const wf of newIntegrations(s).flatMap((i) => i.workflows)) {
     if (!allPlaced.has(`start:${wf.id}`)) {
-      add("warning", 6, `${wf.title || wf.name} has no start form on any page, so nobody can start it from the portal.`, "Put it on Home", (x) => {
+      add("warning", "portal", `${wf.title || wf.name} has no start form on any page, so nobody can start it from the portal.`, "Put it on Home", (x) => {
         const r = clone(x);
         r.pages[0].columns[0].unshift(`start:${wf.id}`);
         return r;
@@ -364,25 +364,25 @@ export function diagnostics(state) {
   const seen = new Map();
   for (const p of s.pages) {
     const key = [...p.columns[0], ...p.columns[1]].sort().join("|");
-    if (key && seen.has(key)) add("warning", 6, `"${p.title}" shows the same components as "${seen.get(key)}".`, `Remove "${p.title}"`, (x) => {
+    if (key && seen.has(key)) add("warning", "portal", `"${p.title}" shows the same components as "${seen.get(key)}".`, `Remove "${p.title}"`, (x) => {
       const r = clone(x);
       r.pages = r.pages.filter((pg) => pg.id !== p.id);
       return r;
     });
     else if (key) seen.set(key, p.title);
-    if (!key && s.pages.length > 1) add("warning", 6, `"${p.title}" is empty.`);
+    if (!key && s.pages.length > 1) add("warning", "portal", `"${p.title}" is empty.`);
   }
   if (s.layout.shell === "hub") {
     const dup = s.pages.filter((p) => s.layout.hubPanes.some((pane) => (pane === "files" ? ["case-list"] : HUB_PANES[pane]).every((c) => [...p.columns[0], ...p.columns[1]].includes(c))));
-    for (const p of dup) add("warning", 6, `The hub already has a pane for what "${p.title}" shows.`);
+    for (const p of dup) add("warning", "portal", `The hub already has a pane for what "${p.title}" shows.`);
   }
   for (const c of s.custom) {
-    if (!on.has(c.id) && !s.header.includes(c.id)) add("warning", 6, `Custom component "${c.name}" isn't on any page.`);
-    if (!c.description.trim()) add("warning", 6, `Custom component "${c.name}" has no description, so the prompt can't say what to build.`);
+    if (!on.has(c.id) && !s.header.includes(c.id)) add("warning", "portal", `Custom component "${c.name}" isn't on any page.`);
+    if (!c.description.trim()) add("warning", "portal", `Custom component "${c.name}" has no description, so the prompt can't say what to build.`);
   }
   for (const s_ of s.capabilities.uploads ? s.behavior.uploads.slots : []) {
-    if (!s_.label.trim()) add("blocker", 5, "An upload slot has no label.");
-    if (!(s_.maxFiles >= 1)) add("blocker", 5, `Upload slot "${s_.label}" must allow at least one file.`);
+    if (!s_.label.trim()) add("blocker", "behavior", "An upload slot has no label.");
+    if (!(s_.maxFiles >= 1)) add("blocker", "behavior", `Upload slot "${s_.label}" must allow at least one file.`);
   }
   return issues;
 }

@@ -42,11 +42,12 @@ function describeIntegration(state, int) {
   const items = int.workflows.map((wf) => {
     const w = wfNames(wf);
     const input = wf.input.map((f) => `${fieldName(f)} (${f.type}${f.required ? "" : ", optional"})`).join(", ") || "nothing";
+    const who = (wf.startRoles ?? []).length ? ` by ${wf.startRoles.join(" or ")}` : "";
     if (wf.kind === "agent") {
-      return `${w.display}: a durable agent${int.source === "new" ? `, started with \`POST ${startPath(int)}/${w.path}\` (${input})${wf.chat ? `; it opens a chat in which the agent takes part as \`${w.agentId}\`` : ""}` : ""}.`;
+      return `${w.display}: a durable agent${int.source === "new" ? `, started${who} with \`POST ${startPath(int)}/${w.path}\` (${input})${wf.chat ? `; it opens a chat in which the agent takes part as \`${w.agentId}\`` : ""}` : ""}.`;
     }
     const tasks = (wf.tasks ?? []).map((t) => `"${t.title || t.name}" (\`${taskKey(wf, t)}\`) for ${t.roles.join(", ") || "anyone"}`).join(", then ");
-    return `${w.display}: a workflow${int.source === "new" ? `, started with \`POST ${startPath(int)}/${w.path}\` (${input})` : `, started through its management API (\`workflowType: "${wf.fixedName ?? wf.name}"\`)`}; it waits for ${tasks || "no human task"}.`;
+    return `${w.display}: a workflow${int.source === "new" ? `, started${who} with \`POST ${startPath(int)}/${w.path}\` (${input})` : `, started${who} through its management API (\`workflowType: "${wf.fixedName ?? wf.name}"\`)`}; it waits for ${tasks || "no human task"}.`;
   });
   return `${int.title} (${int.source === "new" ? `new Ballerina package \`${int.org}/${int.pkg}\`` : `existing integration \`${int.org}/${int.pkg}\`${int.version ? ` ${int.version}` : ""}, imported from its workflow.def.json`}):
 ${bullet(items)}`;
@@ -117,21 +118,24 @@ ${bullet(proxies(state).map(([a, , b]) => `\`${a}\` → \`${b}\``))}`,
     check: `the dev server starts${packaged.length ? ", the component packages load without console errors" : ""}, and each proxy path answers.`
   });
 
+  const quick = state.identity.login.quick;
+  const users = state.identity.users;
   steps.push({
     title: "The login screen and sign-in",
-    body: `The first screen is the login screen: the app's name${state.identity.login.title ? ` ("${state.identity.login.title}")` : ""}${state.identity.login.subtitle ? `, "${state.identity.login.subtitle}"` : ""}, and ${idp.id === "none"
-      ? `a list of the initial users to sign in as (development only): ${state.identity.users.map((u) => `${u.name} (${u.roles.join(", ")})`).join(", ")}. Signing in as one calls \`configureAuth(devUser(username, roles))\` and sends \`x-user-id\` / \`x-user-roles\` to every backend. Keep this in one \`auth\` module so OIDC can replace it.`
-      : `a "Sign in with ${idp.name}" button. Use the OIDC authorization code flow with PKCE (a public client: no client secret in the browser):
+    body: `The first screen is the login screen: the app's name${state.identity.login.title ? ` ("${state.identity.login.title}")` : ""}${state.identity.login.subtitle ? `, "${state.identity.login.subtitle}"` : ""}, and a username and password form. ${idp.id === "none"
+      ? `No identity provider yet (development only): check the username and password against the initial users and their development passwords (\`<username>-change-me\`), kept in one \`auth\` module so OIDC can replace it. Signing in calls \`configureAuth(devUser(username, roles))\` and sends \`x-user-id\` / \`x-user-roles\` to every backend.${quick ? ` Below the form, add a "Quick sign-in" row with one button per initial user (${users.map((u) => `${u.name}: ${u.roles.join(", ")}`).join("; ")}); a button signs in as that user at once. It's a demo shortcut: hide it behind a \`demoMode\` flag.` : ""}`
+      : `The form is ${idp.name}'s own sign-in page: "Sign in" starts the OIDC authorization code flow with PKCE (a public client: no client secret in the browser), so the portal never handles passwords:
 ${bullet([
   `Client ID \`${state.identity.idp.clientId}\`, authorize \`${state.identity.idp.authorizeUrl}\`, token \`${state.identity.idp.tokenUrl}\`, scopes \`${state.identity.idp.scopes}\`, redirect URI \`http://localhost:5173/callback\`.`,
   plain ? "Write the PKCE flow by hand (about 60 lines: code verifier, S256 challenge, redirect, code exchange). No library." : "Use `oidc-client-ts` (Apache-2.0) for the flow.",
   `Keep the access token in sessionStorage. Read the user ID from \`${state.identity.idp.userIdClaim}\` and the roles from \`${state.identity.idp.rolesClaim}\` only to shape the UI; every backend checks the token itself.`,
   packaged.length ? "Call `configureAuth(bearer(() => token, () => signIn()))` once, so every component sends the token and a 401 starts sign-in again." : "",
   "Send the same `Authorization: Bearer` header to every integration's app, start and management paths.",
+  quick ? `Quick sign-in for demos: one button per initial user (${users.map((u) => u.username).join(", ")}) starts the same flow with \`login_hint=<username>\`, so ${idp.name}'s form arrives with the username filled in.` : "",
   idp.defaults.selfSigned ? `${idp.name} uses a self-signed certificate in development: proxy the token endpoint through the dev server.` : ""
 ])}`}
-After sign-in, show the portal; Sign out returns to the login screen.`,
-    check: `you can sign in as ${state.identity.users.map((u) => u.username).join(", ")}${idp.id !== "none" ? ` (passwords from the identity seed file, e.g. \`${devPassword(state.identity.users[0] ?? {username: "user"})}\`)` : ""}, and each sees the portal.`
+After sign-in, show the portal; Sign out returns to the login screen. Show each start form only to the roles that may start it (the start service checks it too).`,
+    check: `you can sign in as ${users.map((u) => u.username).join(", ")} with their passwords (e.g. \`${devPassword(users[0] ?? {username: "user"})}\`)${quick ? ", and with the quick sign-in buttons" : ""}, and each sees the portal.`
   });
 
   steps.push({title: "Layout and navigation", body: layoutText(state),
@@ -335,7 +339,7 @@ cd backend/${int.pkg} && bal build
 ${int.workflows.length ? `The start service (start.bal) has one resource per workflow and agent:
 ${bullet(int.workflows.map((wf) => {
   const w = wfNames(wf);
-  return `\`POST /start/${w.path}\` takes \`${w.input}\`, takes the next run ID, ${wf.kind === "agent" && wf.chat && p.services.includes("chat") ? `opens a conversation (correlationId = the run ID) with \`${w.agentId}\` as a participant, ` : ""}${wf.kind === "agent" ? `spawns \`${w.agentVar}\`` : `starts \`${w.fn}\``} with the input plus \`runId\` and \`startedBy\`, records the run and returns \`{runId, instanceId, conversationId}\`.`;
+  return `\`POST /start/${w.path}\` takes \`${w.input}\`, ${(wf.startRoles ?? []).length ? `returns 403 unless the caller holds ${wf.startRoles.join(" or ")}, ` : ""}takes the next run ID, ${wf.kind === "agent" && wf.chat && p.services.includes("chat") ? `opens a conversation (correlationId = the run ID) with \`${w.agentId}\` as a participant, ` : ""}${wf.kind === "agent" ? `spawns \`${w.agentVar}\`` : `starts \`${w.fn}\``} with the input plus \`runId\` and \`startedBy\`, records the run and returns \`{runId, instanceId, conversationId}\`.`;
 }))}
 Add input validation where it's needed (\`service_commons:badRequest\`).` : "It has no workflows yet."}${int === ints[0] ? customEndpoints(state) : ""}`,
       check: `\`bal build\` succeeds, and ${int.workflows.length ? `\`POST localhost:${p.ports.app}/start/${wfNames(int.workflows[0]).path}\` returns 201` : `\`GET localhost:${p.ports.app}/app/runs\` returns \`[]\``}.`

@@ -1,6 +1,7 @@
 import {configureAuth, devUser} from "../../vendor/hub-ui.bundle.js";
 import "../../vendor/workflow-ui.bundle.js";
 import {IDPS} from "../catalog.js";
+import {devPassword} from "../identity.js";
 import {wfNames} from "../code.js";
 import {startInputSchema} from "../contracts.js";
 import {component, findWorkflow, integrationOf, integrationsOf, managedIntegrations, newIntegrations, pageComponents, qualifiedTaskName,
@@ -198,6 +199,10 @@ function element(id) {
     const wf = findWorkflow(config, c.start);
     const int = integrationOf(config, wf.id);
     const existing = int.source !== "new";
+    const need = wf.startRoles ?? [];
+    if (need.length && !need.some((r) => persona().roles.includes(r))) {
+      return h("div", {class: "card empty"}, `${c.name}: only ${need.join(" or ")} can start it.`);
+    }
     return h("div", {class: "card"}, h("workflow-start-form", {heading: c.name,
       action: existing ? `${intUrls(int).workflow}/workflows` : `${intUrls(int).app}/start/${wfNames(wf).path}`,
       "workflow-type": existing ? wf.fixedName ?? wf.name : undefined,
@@ -281,21 +286,37 @@ function signOut() {
   select({user: undefined, run: undefined, conversation: undefined, task: undefined, caseId: undefined});
 }
 
-// The app's login screen. With an identity provider the preview simulates its sign-in: pick who signs in.
+// The app's login screen: a username and password form, checked against the initial users' development passwords,
+// and optionally one quick sign-in button per user. With an identity provider this stands in for its sign-in page.
 function login() {
   const idp = IDPS.find((i) => i.id === config.identity.idp.kind);
   const people = personasOf(config);
-  let chosen = people[0]?.id;
-  return h("div", {class: "login"}, h("div", {class: "login-card", role: "form", "aria-label": "Sign in"},
+  const users = config.identity.users;
+  const error = h("p", {class: "error", role: "alert", hidden: true});
+  const submit = (e) => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    const user = users.find((u) => u.username === String(data.get("username")).trim());
+    if (!user || data.get("password") !== devPassword(user)) {
+      error.textContent = "Wrong username or password.";
+      error.hidden = false;
+      return;
+    }
+    signIn(user.username);
+  };
+  return h("div", {class: "login"}, h("div", {class: "login-card"},
     h("h1", {}, config.identity.login.title || config.app.name),
     config.identity.login.subtitle ? h("p", {class: "muted"}, config.identity.login.subtitle) : null,
-    idp.id === "none"
-      ? [h("p", {class: "small muted"}, "Development sign-in: choose a user."),
-        people.map((p) => h("button", {class: "login-user", onclick: () => signIn(p.id)}, h("strong", {}, p.name), h("span", {class: "muted"}, p.roles.join(", ") || "no role")))]
-      : [h("label", {class: "small"}, "Simulated account ", h("select", {"aria-label": "Account", onchange: (e) => { chosen = e.target.value; }},
-          people.map((p) => h("option", {value: p.id}, `${p.name} (${p.roles.join(", ")})`)))),
-        h("button", {class: "login-idp", onclick: () => signIn(chosen)}, `Sign in with ${idp.name}`),
-        h("p", {class: "small muted"}, "The preview doesn't contact the identity provider; the real app uses the OIDC flow.")]));
+    idp.id !== "none" ? h("p", {class: "small muted"}, `${idp.name} sign-in (simulated in the preview)`) : null,
+    h("form", {class: "login-form", "aria-label": "Sign in", onsubmit: submit},
+      h("label", {}, "Username", h("input", {name: "username", autocomplete: "username", required: true})),
+      h("label", {}, "Password", h("input", {name: "password", type: "password", autocomplete: "current-password", required: true})),
+      error,
+      h("button", {type: "submit", class: "login-idp"}, "Sign in")),
+    config.identity.login.quick ? [h("p", {class: "small muted"}, "Quick sign-in (demo)"),
+      people.map((p) => h("button", {type: "button", class: "login-user", onclick: () => signIn(p.id)},
+        h("strong", {}, p.name), h("span", {class: "muted"}, p.roles.join(", ") || "no role")))] : null,
+    h("p", {class: "small muted"}, `Preview passwords: <username>-change-me (e.g. ${devPassword(users[0] ?? {username: "alex"})}).`)));
 }
 
 function openInbox() {

@@ -125,16 +125,13 @@ export function screens(state) {
   return list;
 }
 
-// The login screen: the app's name and either the IdP's button or, in development, the initial users to pick from.
+// The login screen: the app's name, the username and password form, and the quick sign-in buttons when on.
 function login(state) {
   const idp = IDPS.find((i) => i.id === state.identity.idp.kind);
-  const lines = [state.identity.login.subtitle || state.app.description || "", ""];
-  if (idp.id === "none") {
-    lines.push("Sign in as (development):", ...state.identity.users.slice(0, 5).map((u) => `[ ${u.name} · ${u.roles.join(", ")} ]`));
-  } else {
-    lines.push(`[ Sign in with ${idp.name} ]`);
-  }
-  return [box(0, 0, W, H, "", "dim", []), box(W / 2 - 180, 90, 360, 300, state.identity.login.title || state.app.name, "app", lines)];
+  const lines = [state.identity.login.subtitle || state.app.description || "", idp.id === "none" ? "" : `${idp.name} sign-in page`,
+    "Username  [                    ]", "Password  [                    ]", "[ Sign in ]"];
+  if (state.identity.login.quick) lines.push("", "Quick sign-in:", ...state.identity.users.slice(0, 3).map((u) => `[ ${u.name} · ${u.roles.join(", ")} ]`));
+  return [box(0, 0, W, H, "", "dim", []), box(W / 2 - 180, 60, 360, 360, state.identity.login.title || state.app.name, "app", lines)];
 }
 
 function box(x, y, w, h, text, kind, lines = []) {
