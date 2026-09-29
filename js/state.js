@@ -2,12 +2,21 @@ import {ACTIVITIES, COMPONENTS, IDPS} from "./catalog.js";
 
 // The builder's whole state; the page encodes it in the URL hash so a link reproduces the selection.
 // A page has `columns: [left, right]`; a single-column page shows both lists stacked, so switching loses nothing.
+export const VERSION = 4;
+
 export function defaults() {
   return {
-    version: 3,
+    version: VERSION,
+    scenario: "custom",
     app: {name: "My app", description: "", idPrefix: "RUN", roles: ["User", "Admin"], adminRoles: ["Admin"],
       org: "myorg", pkg: "my_app"},
-    layout: {shell: "sidebar", collapsible: true, hubPanes: ["inbox", "chats", "files"]},
+    capabilities: {chat: false, uploads: false, notifications: false, tasks: false, runs: false},
+    behavior: {
+      uploads: {slots: [{name: "documents", label: "Documents", mimeTypes: ["application/pdf", "image/*"], maxFiles: 3, required: true}]},
+      notifications: {scope: "both", events: {runStarted: false, taskAssigned: true, runFinished: true}}
+    },
+    // auto: pages follow the capabilities until the user edits them.
+    layout: {shell: "sidebar", collapsible: true, hubPanes: ["inbox", "chats", "files"], auto: true},
     header: ["user-menu"],
     bell: {opens: "drawer"},
     pages: [{id: "home", title: "Home", layout: "single", ratio: 40, collapsible: true, columns: [[], []]}],
@@ -16,6 +25,8 @@ export function defaults() {
     frontend: {framework: "plain"},
     db: "h2",
     idp: {kind: "none", ...IDPS.find((i) => i.id === "thunder").defaults, clientId: "app-portal", audience: ""},
+    // Per service: mock (the preview's sample data) or live (a URL). Tokens never go here.
+    connections: Object.fromEntries(["app", "workflow", "chat", "attachment", "notification"].map((id) => [id, {mode: "mock", url: ""}])),
     assistants: {backend: "claude", workflow: "claude"},
     style: "steps",
     deploy: "local"
@@ -27,6 +38,7 @@ export const PRESETS = [
   {id: "chat-agent", name: "Chat agent", desc: "Starting it opens a chat; the agent joins as a participant and works with the user there.",
     build: () => ({kind: "agent", name: "assistant", title: "Assistant", displayName: "Assistant", chat: true, uploads: false,
       purpose: "Helps the user with one request, in a chat, until it is done.",
+      greeting: "Hi! I'm your assistant. Tell me what you need and I'll take it from there.",
       input: [{name: "topic", label: "What do you need?", type: "text", required: true}],
       steps: ["When the run starts: greet the user in the chat and ask what you need to know.",
         "When a MESSAGE arrives: answer it, and askForm when you need structured details.",
@@ -35,7 +47,7 @@ export const PRESETS = [
       approval: {on: false, activity: "updateStatus", userRoles: [], adminRoles: []}, tasks: []})},
   {id: "agent", name: "Agent", desc: "A durable agent with no chat: it acts through notifications, uploads and status.",
     build: () => ({kind: "agent", name: "worker", title: "Worker", displayName: "Worker", chat: false, uploads: false,
-      purpose: "Works one run in the background and reports back.",
+      purpose: "Works one run in the background and reports back.", greeting: "",
       input: [{name: "title", label: "Title", type: "string", required: true}],
       steps: ["When the run starts: do the work, notifyUser the startedBy user with the outcome, and updateStatus to DONE."],
       activities: ["notifyUser", "updateStatus"],
@@ -71,16 +83,40 @@ export function encode(state) {
   return btoa(String.fromCharCode(...new TextEncoder().encode(json))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-// Links from before this model (version < 3) open a blank app.
+// Returns {state} for a link or file, or {error} saying why it can't be opened. Version 3 is migrated.
+export function load(parsed) {
+  if (!parsed || typeof parsed !== "object") return {error: "This isn't a builder configuration."};
+  if (parsed.version === VERSION) return {state: merge(defaults(), parsed)};
+  if (parsed.version === 3) return {state: migrate(parsed), notice: "This link was made with an older builder; it was upgraded. Check the layout in step 4."};
+  return {error: `This configuration is version ${parsed.version ?? "unknown"}; the builder opens version 3 and 4. Start from a scenario instead.`};
+}
+
 export function decode(hash) {
   try {
     const base64 = hash.replace(/-/g, "+").replace(/_/g, "/");
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-    const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    return parsed.version === 3 ? merge(defaults(), parsed) : undefined;
+    return load(JSON.parse(new TextDecoder().decode(bytes)));
   } catch {
-    return undefined;
+    return {error: "The link is damaged: it doesn't decode as a configuration."};
   }
+}
+
+// Version 3 had no capabilities: infer them from what the design uses, and keep its hand-made pages.
+export function migrate(old) {
+  const s = merge(defaults(), {...old, version: VERSION});
+  const placed = new Set([...old.header ?? [], ...(old.pages ?? []).flatMap((p) => [...p.columns[0], ...p.columns[1]])]);
+  const agents = (old.workflows ?? []).filter((w) => w.kind === "agent");
+  s.capabilities = {
+    chat: agents.some((a) => a.chat) || placed.has("conversation") || placed.has("conversation-list"),
+    uploads: agents.some((a) => a.uploads) || ["upload-case", "case-list", "file-viewer"].some((id) => placed.has(id)),
+    notifications: placed.has("bell") || placed.has("inbox"),
+    tasks: placed.has("task-inbox") || placed.has("task-form") || (old.workflows ?? []).some((w) => w.kind === "workflow" && (w.tasks ?? []).length),
+    runs: placed.has("runs")
+  };
+  s.layout = {...s.layout, auto: false};
+  s.workflows = s.workflows.map((w) => ({greeting: "", ...w}));
+  s.scenario = "custom";
+  return s;
 }
 
 function merge(base, over) {
@@ -149,9 +185,11 @@ export function usedComponents(state) {
   return [...ids].filter((id) => component(state, id));
 }
 
-// The commons services the backend runs: those the UI uses, and those the agents need.
+// The commons services the backend runs: those the UI uses, those the agents need, and notifications when the
+// app sends them on run and task events.
 export function enabledServices(state) {
   const ids = new Set(usedComponents(state).map((id) => component(state, id).service).filter(Boolean));
+  if (notificationEvents(state).length) ids.add("notification");
   for (const wf of state.workflows.filter((w) => w.kind === "agent")) {
     if (wf.chat) ids.add("chat");
     if (wf.uploads) ids.add("attachment");
@@ -160,6 +198,13 @@ export function enabledServices(state) {
     }
   }
   return ["notification", "chat", "attachment"].filter((id) => ids.has(id));
+}
+
+// The run and task events the app notifies people about (only with the notifications capability).
+export function notificationEvents(state) {
+  if (!state.capabilities?.notifications) return [];
+  const events = state.behavior?.notifications?.events ?? {};
+  return ["runStarted", "taskAssigned", "runFinished"].filter((e) => events[e]);
 }
 
 // The workflow management API is on when a page shows tasks.

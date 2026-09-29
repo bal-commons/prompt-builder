@@ -1,5 +1,6 @@
 import {ACTIVITIES, DATABASES, IDPS, SERVICES, VERSIONS} from "./catalog.js";
-import {camel, enabledServices, identifier, pascal, usesManagementApi} from "./state.js";
+import {choices, fieldName} from "./contracts.js";
+import {camel, enabledServices, identifier, notificationEvents, pascal, usesManagementApi} from "./state.js";
 
 // Generates a Ballerina backend for the selection: the commons servers in one process, typed clients, a start
 // service per workflow and agent, the runs table, the agents with their activities, the workflows with their
@@ -43,7 +44,8 @@ export function wfNames(wf) {
   };
 }
 
-export const fieldName = (field) => camel(field.name || field.label || "field");
+export {fieldName};
+const tells = (state, event) => notificationEvents(state).includes(event);
 
 function ballerinaType(field) {
   switch (field.type) {
@@ -51,7 +53,7 @@ function ballerinaType(field) {
     case "integer": return "int";
     case "boolean": return "boolean";
     case "choice": {
-      const options = (field.options ?? []).map((o) => o.trim()).filter(Boolean);
+      const options = choices(field);
       return options.length ? options.map(lit).join("|") : "string";
     }
     default: return "string";
@@ -420,6 +422,7 @@ export function startBal(state) {
   const imports = ["import ballerina/http;", "import commons/service_commons;", "import commons/service_commons.auth as sauth;"];
   if (flows(state).length) imports.push("import ballerina/workflow;");
   if (withChat.size) imports.push("import commons/chat;");
+  if (tells(state, "runStarted")) imports.push("import commons/notification;");
   const titleOf = (wf) => {
     const f = wf.input.find((x) => fieldName(x) === "title" && x.type !== "boolean");
     const display = lit(wfNames(wf).display);
@@ -450,10 +453,13 @@ export function startBal(state) {
                 {participantType: chat:AGENT, participantId: ${lit(w.agentId)}, displayName: ${lit(wf.displayName || w.display)}}
             ]
         });
-        conversationId = conversation.id;` : ""}
+        conversationId = conversation.id;${wf.greeting?.trim() ? `
+        // The greeting comes from the design, so the user sees it before the agent's first turn.
+        _ = check chats->sendText(conversation.id, ${lit(wf.greeting.trim())}, ${lit(w.agentId)}, runId + "-greeting");` : ""}` : ""}
         ${start}
         check saveRun({id: runId, workflow: ${lit(w.fn)}, ownerId: caller.userId, title: ${titleOf(wf)}, status: "RUNNING",
-            conversationId, instanceId, createdAt: service_commons:toIso(service_commons:nowMillis())});
+            conversationId, instanceId, createdAt: service_commons:toIso(service_commons:nowMillis())});${tells(state, "runStarted") ? `
+        tell(notification:USER, caller.userId, string \`Started \${runId}\`, ${lit(`${w.display} is working on it.`)}, runId, runId + "/started");` : ""}
         Started body = {runId, instanceId, conversationId};
         return <http:Created>{body};
     }`;
@@ -510,7 +516,8 @@ messages short. Send each person at most one message per turn. When the step's t
 exactly [done] and no tool call, which ends the turn. When a question comes in while you cannot use tools,
 answer it directly in a sentence or two.
 
-Do only the step for the event you just received, then end the turn and wait for the next event.
+Do only the step for the event you just received, then end the turn and wait for the next event.${wf.chat && wf.greeting?.trim() ? `
+The app has already greeted the user for you: "${wf.greeting.trim()}". Don't greet them again.` : ""}
 ${steps ? `
 The process:
 ${steps}` : ""}`.replace(/`/g, "'").replace(/\$\{/g, "$ {");
@@ -550,17 +557,23 @@ ${decl.join(",\n")}
 export function workflowsBal(state) {
   const list = flows(state);
   if (!list.length) return "";
-  return `import ballerina/workflow;
+  return `import ballerina/workflow;${tells(state, "runFinished") || tells(state, "taskAssigned") ? "\nimport commons/notification;" : ""}
 ${list.map((wf) => {
     const w = wfNames(wf);
     const tasks = wf.tasks ?? [];
-    const about = wf.input.length
-      ? `{${wf.input.map((f) => `${lit(fieldName(f))}: input.${ident(fieldName(f))}`).join(", ")}}`
-      : "{}";
+    // What a task shows beside its form: the start fields the design chose for it (all by default).
+    const about = (task) => {
+      const shown = wf.input.filter((f) => !task.context || task.context.includes(fieldName(f)));
+      return shown.length ? `{${shown.map((f) => `${lit(fieldName(f))}: input.${ident(fieldName(f))}`).join(", ")}}` : "{}";
+    };
     const body = tasks.map((task, i) => {
       const key = camel(task.name || `task${i + 1}`);
       const type = `${w.start.replace(/Start$/, "")}${pascal(key)}`;
-      return `    ${type} ${key}Answer = check ctx->awaitHumanTask(${lit(key)}, about${task.roles.length ? `,
+      const notify = tells(state, "taskAssigned") && task.roles.length ? `    string ${key}Notified = check ctx->callActivity(notifyReviewers, {runId: input.runId, roles: [${task.roles.map(lit).join(", ")}],
+        title: ${lit(task.title || task.name)}});
+    _ = ${key}Notified;
+` : "";
+      return `${notify}    ${type} ${key}Answer = check ctx->awaitHumanTask(${lit(key)}, ${about(task)}${task.roles.length ? `,
         userRoles = ${roleList(task.roles)}` : ""}, title = string \`${(task.title || task.name).replace(/`/g, "'").replace(/\$\{/g, "$ {")} · \${input.runId}\`${task.description ? `,
         description = ${lit(task.description)}` : ""});
     answers[${lit(key)}] = ${key}Answer.toJson();`;
@@ -569,8 +582,6 @@ ${list.map((wf) => {
 // ${w.display}${wf.purpose ? `: ${wf.purpose}` : ""}
 @workflow:Workflow
 function ${w.fn}(workflow:Context ctx, ${w.start} input) returns json|error {
-    // What every task shows beside its form.
-    map<json> about = ${about};
     map<json> answers = {};
 ${body}
     string status = check ctx->callActivity(finishRun, {runId: input.runId, status: "DONE"});
@@ -578,13 +589,27 @@ ${body}
 }`;
   }).join("\n")}
 
-// Marks a run finished in the app's table, so the runs list shows it.
+// Marks a run finished in the app's table, so the runs list shows it${tells(state, "runFinished") ? ", and tells whoever started it" : ""}.
 @workflow:Activity
 function finishRun(string runId, string status) returns string|error {
-    check setRunStatus(runId, status);
+    check setRunStatus(runId, status);${tells(state, "runFinished") ? `
+    Run? run = check runById(runId);
+    if run is Run {
+        tell(notification:USER, run.ownerId, string \`\${runId} is \${status.toLowerAscii()}\`, run.title, runId, runId + "/" + status);
+    }` : ""}
     return status;
 }
-`;
+${tells(state, "taskAssigned") ? `
+// Tells a task's reviewer roles that it is waiting for them.
+@workflow:Activity
+function notifyReviewers(string runId, string[] roles, string title) returns string|error {
+    foreach string role in roles {
+        tell(notification:ROLE, role, string \`\${title} · \${runId}\`, "A task is waiting for you in the task inbox.", runId,
+            runId + "/" + title + "/" + role);
+    }
+    return "notified";
+}
+` : ""}`;
 }
 
 const ACTIVITY_DESCRIPTIONS = {
@@ -606,6 +631,9 @@ export function activitiesBal(state) {
   const chat = has(state, "chat");
   const imports = new Set(["import ballerina/workflow;"]);
   const blocks = [];
+  if (ids.has("updateStatus") && tells(state, "runFinished")) {
+    imports.add("import commons/notification;");
+  }
   if (ids.has("notifyUser") || ids.has("notifyRole")) {
     imports.add("import commons/notification;");
     imports.add("import ballerina/crypto;");
@@ -628,7 +656,13 @@ function updateStatus(string correlationId, string status) returns string|error 
     if value == "" {
         return error("status is required, e.g. APPROVED or DONE");
     }
-    check setRunStatus(id, value);
+    check setRunStatus(id, value);${tells(state, "runFinished") ? `
+    if value == "DONE" {
+        Run? run = check runById(id);
+        if run is Run {
+            tell(notification:USER, run.ownerId, string \`\${id} is done\`, run.title, id, id + "/DONE");
+        }
+    }` : ""}
     return string \`\${id} is now \${value}\`;
 }`);
   }
@@ -725,7 +759,14 @@ function closeConversation(string correlationId, string reason) returns string|e
 }`);
   }
   if (ids.has("requestUpload")) {
-    blocks.push(`@workflow:Activity
+    const slots = state.behavior?.uploads?.slots?.length ? state.behavior.uploads.slots
+      : [{name: "files", label: "Files", mimeTypes: [], maxFiles: 3, required: true}];
+    blocks.push(`// The upload slots of the design: what an upload case asks for.
+final attachment:NewSlot[] & readonly uploadSlots = [
+${slots.map((sl) => `    {name: ${lit(identifier(sl.name || sl.label, "files"))}, label: ${lit(sl.label || sl.name)}, mimeTypes: [${(sl.mimeTypes ?? []).map(lit).join(", ")}], minFiles: ${sl.required ? 1 : 0}, maxFiles: ${Math.max(1, Number(sl.maxFiles) || 1)}}`).join(",\n")}
+];
+
+@workflow:Activity
 function requestUpload(string correlationId, string userId, string title, string instructions,
         string[]? mimeTypes = (), int? maxFiles = ()) returns string|error {
     attachment:Case created = check attachments->createCase({
@@ -735,7 +776,9 @@ function requestUpload(string correlationId, string userId, string title, string
         title,
         description: instructions,
         subjects: [userId],
-        slots: [{name: "files", label: title, mimeTypes: mimeTypes ?: [], maxFiles: maxFiles ?: 3}]
+        // The slots the design configured, unless the agent asks for one-off types or a count.
+        slots: mimeTypes is () && maxFiles is () ? uploadSlots.clone()
+            : [{name: "files", label: title, mimeTypes: mimeTypes ?: [], maxFiles: maxFiles ?: 3}]
     });${chat ? `
     [string, string]|error conversation = conversationOf(correlationId);
     if conversation is [string, string] {
@@ -743,7 +786,7 @@ function requestUpload(string correlationId, string userId, string title, string
             id: "upload-" + created.id,
             kind: chat:ATTACHMENT_REF,
             senderId: conversation[1],
-            content: {name: title, caseId: created.id, slot: "files"}
+            content: {name: title, caseId: created.id, slot: created.slots[0].name}
         });
     }` : ""}
     return created.id;
@@ -1113,15 +1156,20 @@ ${volumes.map((v) => `  ${v}:`).join("\n")}
 }
 
 // The browser-facing paths: [proxy path, where nginx sends it, where the dev server sends it].
+// The development targets are the live URLs of step 5 when set, else the generated app's local ports.
 export function proxies(state) {
+  const live = (id, path, fallback) => {
+    const c = state.connections?.[id];
+    return c?.mode === "live" && c.url.trim() ? c.url.trim().replace(/\/+$/, "") + path : fallback;
+  };
   return [
-    ["/api/app", "http://app:9090/app", "http://localhost:9090/app"],
-    ...(state.workflows.length ? [["/api/start", "http://app:9090/start", "http://localhost:9090/start"]] : []),
-    ...(usesManagementApi(state) ? [["/api/workflow", "http://app:8234/workflow", "http://localhost:8234/workflow"]] : []),
+    ["/api/app", "http://app:9090/app", live("app", "/app", "http://localhost:9090/app")],
+    ...(state.workflows.length ? [["/api/start", "http://app:9090/start", live("app", "/start", "http://localhost:9090/start")]] : []),
+    ...(usesManagementApi(state) ? [["/api/workflow", "http://app:8234/workflow", live("workflow", "", "http://localhost:8234/workflow")]] : []),
     ...enabledServices(state).map((id) => {
       const s = SERVICES.find((x) => x.id === id);
       const path = id === "notification" ? "notifications" : id === "attachment" ? "attachments" : "chat";
-      return [`/api/${path}`, `http://app:${s.port}${s.basePath}`, `http://localhost:${s.port}${s.basePath}`];
+      return [`/api/${path}`, `http://app:${s.port}${s.basePath}`, live(id, "", `http://localhost:${s.port}${s.basePath}`)];
     })
   ];
 }
@@ -1148,6 +1196,24 @@ ${proxies(state).map(([from, to]) => `
 `;
 }
 
+// How the app tells people about runs and tasks.
+export function notifyBal(state) {
+  if (!notificationEvents(state).length) return "";
+  return `import ballerina/log;
+import commons/notification;
+
+// Sends a notification about a run; a failure is logged and never fails the run or the request.
+isolated function tell(notification:RecipientType recipientType, string recipientId, string title, string body,
+        string correlationId, string idempotencyKey) {
+    notification:Notification|error sent = notifications->send({recipientType, recipientId, title, body, correlationId,
+        idempotencyKey});
+    if sent is error {
+        log:printWarn(string \`Could not notify \${recipientId}\`, 'error = sent);
+    }
+}
+`;
+}
+
 // Every generated file, in the order a reader should see them.
 export function files(state) {
   const list = [
@@ -1163,6 +1229,7 @@ export function files(state) {
     ["backend/workflows.bal", workflowsBal(state)],
     ["backend/activities.bal", activitiesBal(state)],
     ["backend/hooks.bal", hooksBal(state)],
+    ["backend/notify.bal", notifyBal(state)],
     ["backend/Config.toml", configToml(state)]
   ].filter(([, content]) => content);
   if (state.deploy === "compose") {

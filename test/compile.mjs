@@ -1,55 +1,49 @@
-// Generates backends for several app designs and compiles each with `bal build`.
+// Generates backends for every scenario and a few edge cases, and compiles each with `bal build`.
 // Usage: node test/compile.mjs <work dir> [variant...]
 import {execFileSync} from "node:child_process";
 import {mkdirSync, rmSync, writeFileSync} from "node:fs";
 import {dirname, join} from "node:path";
 import {files} from "../js/code.js";
+import {applyScenario, setCapability} from "../js/compose.js";
 import {defaults, newWorkflow} from "../js/state.js";
 
-const add = (s, preset, change = (w) => w) => { const w = change(newWorkflow(s, preset)); s.workflows.push(w); return w; };
-const place = (s, ...ids) => { s.pages[0].columns[0].push(...ids); return s; };
-
+const scenario = (id, change = (s) => s) => () => change(applyScenario(defaults(), id));
 const variants = {
-  blank: () => defaults(),
-  chatAgent: () => {
-    const s = defaults();
-    const a = add(s, "chat-agent");
-    return place(s, `start:${a.id}`, "runs", "conversation");
-  },
-  approvalTasks: () => {
-    const s = defaults();
-    const w = add(s, "approval");
-    return place(s, `start:${w.id}`, "runs", "task-inbox", "task-form");
-  },
+  custom: scenario("custom"),
+  assistant: scenario("assistant"),
+  approval: scenario("approval", (s) => {
+    s.behavior.notifications.events = {runStarted: true, taskAssigned: true, runFinished: true};
+    return s;
+  }),
+  documents: scenario("documents", (s) => {
+    s.behavior.notifications.events.runStarted = true;
+    return s;
+  }),
   agentNoServices: () => {
     const s = defaults();
-    add(s, "agent", (w) => ({...w, activities: ["updateStatus"]}));
+    s.workflows.push({...newWorkflow(s, "agent"), activities: ["updateStatus"]});
     return s;
   },
   everything: () => {
-    const s = defaults();
-    s.header = ["bell", "user-menu"];
+    let s = applyScenario(defaults(), "documents");
+    s = setCapability(s, "tasks", true).state;
+    s.behavior.notifications.events = {runStarted: true, taskAssigned: true, runFinished: true};
     s.idp = {...s.idp, kind: "keycloak", issuer: "http://localhost:8080/realms/app", jwksUrl: "http://localhost:8080/realms/app/protocol/openid-connect/certs",
       userIdClaim: "preferred_username", rolesClaim: "realm_access.roles", audience: "account"};
     s.db = "postgresql";
     s.deploy = "compose";
-    const chat = add(s, "chat-agent", (w) => ({...w, uploads: true,
-      activities: ["notifyUser", "notifyRole", "sendMessage", "askForm", "closeConversation", "requestUpload", "closeCase", "updateStatus"],
-      approval: {on: true, activity: "closeCase", userRoles: ["Admin"], adminRoles: ["Admin"]},
-      input: [{name: "type", label: "Type", type: "choice", options: ["Bug", "Idea", "R&D"], required: true},
-        {name: "from", label: "From", type: "string", required: false},
-        {name: "amount", label: "Amount", type: "number", required: false},
-        {name: "count", label: "Count", type: "integer", required: true},
-        {name: "urgent", label: "Urgent", type: "boolean", required: false},
-        {name: "due", label: "Due", type: "date", required: false}]}));
-    add(s, "agent");
-    const flow = add(s, "approval", (w) => ({...w, tasks: [...w.tasks,
-      {name: "pay", title: "Pay it", description: "Finance pays", roles: ["Admin", "User"],
-        fields: [{name: "costCentre", label: "Cost centre", type: "choice", options: ["OPS", "SALES"], required: true},
-          {name: "amount", label: "Amount", type: "number", required: true}]}]}));
-    add(s, "workflow", (w) => ({...w, input: []}));
-    s.pages.push({id: "tasks", title: "Tasks", layout: "split", ratio: 35, collapsible: true, columns: [["task-inbox"], ["task-form"]]});
-    return place(s, `start:${chat.id}`, `start:${flow.id}`, "runs", "conversation", "inbox", "case-list", "file-viewer");
+    const agent = s.workflows.find((w) => w.kind === "agent");
+    agent.activities = ["notifyUser", "notifyRole", "sendMessage", "askForm", "closeConversation", "requestUpload", "closeCase", "updateStatus"];
+    agent.approval = {on: true, activity: "closeCase", userRoles: ["Officer"], adminRoles: ["Officer"]};
+    agent.input.push({name: "type", label: "Type", type: "choice", options: ["Bug", "R&D"], required: true},
+      {name: "from", label: "From", type: "string", required: false}, {name: "count", label: "Count", type: "integer", required: true},
+      {name: "due", label: "Due", type: "date", required: false});
+    const flow = s.workflows.find((w) => w.kind === "workflow");
+    flow.tasks.push({name: "pay", title: "Pay it", description: "Finance pays", roles: ["Officer", "Applicant"],
+      fields: [{name: "costCentre", label: "Cost centre", type: "choice", options: ["OPS", "SALES"], required: true},
+        {name: "amount", label: "Amount", type: "number", required: true}]});
+    s.workflows.push({...newWorkflow(s, "workflow"), input: []});
+    return s;
   }
 };
 
@@ -67,8 +61,9 @@ for (const [name, make] of Object.entries(variants)) {
     writeFileSync(target, content);
   }
   try {
-    execFileSync("bal", ["build"], {cwd: dir, stdio: "pipe", timeout: 600_000});
-    console.log(`ok   ${name}`);
+    const out = execFileSync("bal", ["build"], {cwd: dir, stdio: "pipe", timeout: 600_000}).toString();
+    const warnings = out.split("\n").filter((l) => l.startsWith("WARNING"));
+    console.log(`ok   ${name}${warnings.length ? ` (${warnings.length} warnings)\n${warnings.join("\n")}` : ""}`);
   } catch (e) {
     failed++;
     console.log(`FAIL ${name}\n${(e.stdout ?? "").toString()}${(e.stderr ?? "").toString()}`);

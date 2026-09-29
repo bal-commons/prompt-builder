@@ -4,39 +4,54 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>App Prompt Builder</title>
-  <meta name="description" content="Pick the bal-commons services and components, an identity provider and a durable agent; get wireframes, prompts for Claude Code or Ballerina Copilot, and a Ballerina starter that compiles.">
+  <meta name="description" content="Design a demo portal for Ballerina workflows and durable agents, try it with sample data, and get prompts and a Ballerina starter that compiles.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232563eb'/><path d='M9 10h14M9 16h14M9 22h9' stroke='white' stroke-width='3' stroke-linecap='round'/></svg>">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="js/app.js"></script>
 </head>
-<body>
+<body data-show="configure">
+  <a class="skip" href="#form">Skip to the settings</a>
   <header class="top">
     <div class="brand">
       <strong>App Prompt Builder</strong>
-      <span class="muted">bal-commons · Ballerina · durable agents</span>
+      <span class="muted">Demo portals for Ballerina workflows and durable agents</span>
     </div>
     <div class="top-actions">
+      <div class="segmented" role="group" aria-label="Editing mode">
+        <button type="button" data-mode="guided" aria-pressed="true">Guided</button>
+        <button type="button" data-mode="advanced" aria-pressed="false">Advanced</button>
+      </div>
       <button id="share" type="button">Copy link</button>
-      <button id="reset" type="button">Reset</button>
-      <button id="download" type="button" class="primary">Download starter (.zip)</button>
+      <button id="reset" type="button">Start over</button>
+      <button id="download" type="button" class="primary">Download starter</button>
     </div>
   </header>
+  <div id="banner"></div>
+  <nav id="steps" class="steps" aria-label="Steps"></nav>
+  <div class="pane-switch segmented" role="group" aria-label="Show">
+    <button type="button" data-pane="configure" aria-pressed="true">Configure</button>
+    <button type="button" data-pane="preview" aria-pressed="false">Preview</button>
+  </div>
   <main class="layout">
-    <form id="form" class="form" autocomplete="off" aria-label="Choices"></form>
+    <section class="config" aria-label="Settings">
+      <div id="form" class="form"></div>
+    </section>
     <section class="output" aria-label="Result">
-      <div class="tabs" role="tablist" aria-label="Result">
-        <button role="tab" id="tab-wireframe" aria-controls="panel-wireframe" aria-selected="true">Wireframe</button>
-        <button role="tab" id="tab-prompts" aria-controls="panel-prompts" aria-selected="false">Prompts</button>
-        <button role="tab" id="tab-code" aria-controls="panel-code" aria-selected="false">Code</button>
+      <div id="tabs" class="tabs" role="tablist" aria-label="Result">
+        <button role="tab" id="tab-preview" aria-controls="panel-preview" aria-selected="true">Preview</button>
+        <button role="tab" id="tab-wireframe" aria-controls="panel-wireframe" aria-selected="false" tabindex="-1">Wireframe</button>
+        <button role="tab" id="tab-prompts" aria-controls="panel-prompts" aria-selected="false" tabindex="-1">Prompts</button>
+        <button role="tab" id="tab-code" aria-controls="panel-code" aria-selected="false" tabindex="-1">Code</button>
       </div>
-      <div id="panel-wireframe" role="tabpanel" aria-labelledby="tab-wireframe" class="panel"></div>
+      <div id="panel-preview" role="tabpanel" aria-labelledby="tab-preview" class="panel preview-panel"></div>
+      <div id="panel-wireframe" role="tabpanel" aria-labelledby="tab-wireframe" class="panel" hidden></div>
       <div id="panel-prompts" role="tabpanel" aria-labelledby="tab-prompts" class="panel" hidden></div>
       <div id="panel-code" role="tabpanel" aria-labelledby="tab-code" class="panel" hidden></div>
     </section>
   </main>
   <footer class="foot muted">
     Apache-2.0 · <a href="https://github.com/bal-commons/prompt-builder">Source</a> ·
-    <a href="https://github.com/bal-commons">bal-commons</a> · Everything runs in your browser; nothing is sent anywhere.
+    <a href="https://github.com/bal-commons">bal-commons</a> · Everything runs in your browser; nothing is sent anywhere unless you connect a live service.
   </footer>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>

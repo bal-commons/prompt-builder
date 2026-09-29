@@ -245,3 +245,89 @@ export const VERSIONS = {
   commons: "0.1.0",
   ui: "0.1"
 };
+
+// What a demo can do. Each capability names the components it adds, the services it needs and what it depends on;
+// compose.js applies them and diagnostics() checks them.
+export const CAPABILITIES = [
+  {
+    id: "chat",
+    name: "AI chat",
+    summary: "A durable agent works with each user in a conversation: it answers, asks for details and acts.",
+    example: "“Help me draft a refund request.”",
+    adds: ["A start form that spawns the agent", "The conversation view", "Streamed agent replies and forms in the chat"],
+    services: ["chat"],
+    explainOn: "Chat adds the agent's start form and a conversation view; the agent joins each chat as its own participant.",
+    explainOff: "Chat removed: its components left the pages. The agent stays (it no longer opens a chat); delete it in step 3 if you don't need it."
+  },
+  {
+    id: "uploads",
+    name: "File uploads",
+    summary: "People upload named files the workflow needs, then preview, replace and submit them.",
+    example: "“Upload your ID and a proof of address.”",
+    adds: ["Upload cards (inside the chat when chat is on)", "A Files page with the case list and file viewer"],
+    services: ["attachment"],
+    requires: ["chat"],
+    explainOn: "Uploads add upload slots the agent asks for in the chat, and a Files page.",
+    explainOff: "Uploads removed: the Files page and upload components left the portal; the slots you configured are kept."
+  },
+  {
+    id: "notifications",
+    name: "Notifications",
+    summary: "A bell with an unread count and an inbox of personal and role notifications, kept live.",
+    example: "“RUN-1001 is waiting for your review.”",
+    adds: ["The notification bell in the header", "The notification inbox, in a drawer or on its own page"],
+    services: ["notification"],
+    explainOn: "Notifications add the bell to the header; it opens the inbox in a drawer.",
+    explainOff: "Notifications removed: the bell and inbox left the portal; the events you chose are kept."
+  },
+  {
+    id: "tasks",
+    name: "Human tasks",
+    summary: "Workflows wait for people. A task inbox lists what is assigned to the user; each task opens a form generated from its fields.",
+    example: "“Review the expense and choose a cost centre.”",
+    adds: ["A reviewer workflow with a task form", "A Tasks page: task inbox and task form"],
+    services: ["workflow"],
+    explainOn: "Human tasks add a reviewer workflow and a Tasks page with the task inbox and the task form.",
+    explainOff: "Human tasks removed: the Tasks page left the portal. The workflow stays; delete it in step 3 if you don't need it."
+  },
+  {
+    id: "runs",
+    name: "Run tracking",
+    summary: "Users see the workflows and agents they started, with their status; selecting one opens its chat or tasks.",
+    example: "“RUN-1002 · Running”",
+    adds: ["A My runs list on the home page"],
+    services: ["app"],
+    explainOn: "Run tracking adds My runs to the home page.",
+    explainOff: "Run tracking removed: My runs left the pages."
+  }
+];
+
+// Starting scenarios: capabilities plus editable defaults.
+export const SCENARIOS = [
+  {id: "assistant", name: "AI assistant", desc: "An agent helps each user in a chat; it can notify them when it's done.",
+    capabilities: ["chat", "notifications", "runs"],
+    app: {name: "Assistant portal", description: "Users ask an AI assistant for help; it works each request in a durable chat.", roles: ["User", "Admin"]}},
+  {id: "approval", name: "Approval portal", desc: "People submit requests; reviewers decide in a task inbox with generated forms.",
+    capabilities: ["tasks", "notifications", "runs"],
+    app: {name: "Approval portal", description: "Employees submit requests and reviewers approve or reject them.", roles: ["Employee", "Reviewer"]}},
+  {id: "documents", name: "Document collection", desc: "An agent collects the files a case needs, in a chat with upload cards.",
+    capabilities: ["chat", "uploads", "notifications", "runs"],
+    app: {name: "Document collection", description: "An agent collects and checks the documents each application needs.", roles: ["Applicant", "Officer"]}},
+  {id: "custom", name: "Custom", desc: "Start empty and pick capabilities yourself.",
+    capabilities: [],
+    app: {name: "My app", description: "", roles: ["User", "Admin"]}}
+];
+
+// How the builder reaches each service for the preview and the connection test. `probe` is a read-only request.
+export const CONNECTIONS = [
+  {id: "app", name: "Start service and runs", uses: "Start forms, My runs", placeholder: "http://localhost:9090",
+    probe: "/app/runs", expect: (body) => Array.isArray(body)},
+  {id: "workflow", name: "Workflow management API", uses: "Task inbox, task form", placeholder: "http://localhost:8234/workflow",
+    probe: "/runtime", expect: (body) => body && typeof body === "object" && "taskQueue" in body},
+  {id: "chat", name: "Chat service", uses: "Conversations", placeholder: "http://localhost:9101/chat/v1",
+    probe: "/conversations?limit=1", expect: (body) => body && Array.isArray(body.items)},
+  {id: "attachment", name: "Attachment service", uses: "Upload cards, case list, file viewer", placeholder: "http://localhost:9102/attachments/v1",
+    probe: "/cases?limit=1", expect: (body) => body && Array.isArray(body.items)},
+  {id: "notification", name: "Notification service", uses: "Bell, notification inbox", placeholder: "http://localhost:9100/notifications/v1",
+    probe: "/notifications/unread-count", expect: (body) => body && typeof body.total === "number"}
+];

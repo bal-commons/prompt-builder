@@ -1,5 +1,6 @@
 import {ASSISTANTS, componentSummary, DOCS, docUrl, FRAMEWORKS, IDPS, serviceById, SERVICES, VERSIONS, WORKFLOW_UI} from "./catalog.js";
-import {agentActivities, fieldName, proxies, wfNames} from "./code.js";
+import {agentActivities, proxies, wfNames} from "./code.js";
+import {fieldName, startInputSchema} from "./contracts.js";
 import {component, enabledServices, identifier, pageComponents, usedComponents, usesManagementApi} from "./state.js";
 
 // Builds the prompts. Each part is a list of steps; the "full" style joins them into one prompt.
@@ -28,19 +29,8 @@ const agentsOf = (state) => state.workflows.filter((w) => w.kind === "agent");
 const flowsOf = (state) => state.workflows.filter((w) => w.kind === "workflow");
 const proxy = (state, path) => proxies(state).find(([p]) => p === path)?.[0] ?? path;
 
-// The JSON Schema a start form renders, from the start input's fields.
-export function inputSchema(fields) {
-  const properties = {};
-  for (const f of fields) {
-    const p = {title: f.label || f.name};
-    p.type = f.type === "number" || f.type === "integer" || f.type === "boolean" ? f.type : "string";
-    if (f.type === "date") p.format = "date";
-    if (f.type === "text") p.format = "textarea";
-    if (f.type === "choice") p.enum = (f.options ?? []).map((o) => o.trim()).filter(Boolean);
-    properties[fieldName(f)] = p;
-  }
-  return {type: "object", required: fields.filter((f) => f.required).map(fieldName), properties};
-}
+// The JSON Schema a start form renders (shared with the preview).
+export const inputSchema = startInputSchema;
 
 function describeWorkflow(wf) {
   const w = wfNames(wf);
@@ -62,8 +52,20 @@ ${bullet(state.workflows.map(describeWorkflow))}` : "No workflows or agents yet.
 Commons services (Ballerina Central org \`commons\`, version ${VERSIONS.commons}), all running in the backend process:
 ${bullet(list.map((s) => `${s.name}: \`${s.module}\`, port ${s.port}, base path ${s.basePath}. ${s.summary}`))}` : ""}${usesManagementApi(state) ? `
 Human tasks and approvals come from the workflow app's management API (port 8234, \`/workflow\`).` : ""}
-Sign-in: ${idp.id === "none" ? "none yet (development headers)" : `${idp.name} (OIDC)`}.${list.length ? `
+${behaviorLines(state)}Sign-in: ${idp.id === "none" ? "none yet (development headers)" : `${idp.name} (OIDC)`}.${list.length ? `
 Correlation rule: a run's ID is the \`correlationId\` of every conversation, upload case and notification about it.` : ""}`;
+}
+
+// The behavior the design configured, as context lines.
+function behaviorLines(state) {
+  const lines = [];
+  if (state.capabilities?.uploads) {
+    lines.push(`Upload slots (what an upload case asks for): ${state.behavior.uploads.slots.map((s) => `${s.label} (${s.mimeTypes.join(", ") || "any type"}, up to ${s.maxFiles}${s.required ? ", required" : ", optional"})`).join("; ")}.`);
+  }
+  const events = state.capabilities?.notifications ? Object.entries(state.behavior.notifications.events).filter(([, v]) => v).map(([k]) =>
+    ({runStarted: "a run starts (its starter)", taskAssigned: "a task is assigned (its reviewer roles)", runFinished: "a run finishes (its starter)"})[k]) : [];
+  if (events.length) lines.push(`The backend sends notifications when ${events.join(", when ")}.`);
+  return lines.length ? lines.join("\n") + "\n" : "";
 }
 
 // ---------------------------------------------------------------- frontend
@@ -255,15 +257,15 @@ It posts the values as JSON and fires \`workflow-started\` with \`detail.respons
   }
   const mgmt = proxy(state, "/api/workflow");
   switch (c.tag) {
-    case "workflow-task-inbox": return `\`base-url\` = \`${mgmt}\`. It lists the caller's human tasks and approvals and polls. On \`workflow-task-select\`, open \`detail.task\` in the task form.`;
-    case "workflow-task-form": return `\`base-url\` = \`${mgmt}\`, and \`kind\` + \`task-id\` from the inbox's selection. It renders the task's generated form (or Approve / Edit and approve / Reject for an approval) and completes it; the inbox refreshes by itself.`;
+    case "workflow-task-inbox": return `\`base-url\` = \`${mgmt}\`. It lists the caller's human tasks and approvals (the work assigned to them) and polls. On \`workflow-task-select\`, open \`detail.task\` in the task form. Title it "Tasks" or "My tasks", not "Inbox", so it isn't confused with the notification inbox.`;
+    case "workflow-task-form": return `\`base-url\` = \`${mgmt}\`, and \`kind\` + \`task-id\` from the inbox's selection. A human task shows its context and a form generated from its answer type; an approval shows the proposed action with Approve / Edit and approve / Reject. It shows success only after the management API accepts the decision, reports a task someone else already completed (409), and the inbox refreshes by itself.`;
   }
   return COMPONENT_NOTES[c.tag]?.(state) ?? componentSummary(c);
 }
 
 const COMPONENT_NOTES = {
   "commons-notification-bell": (state) => `\`base-url\` = \`/api/notifications\`. On \`commons-bell-click\`, ${state.pages.some((p) => p.id === state.bell.opens) ? "navigate to the notifications page" : "open the inbox drawer"}.`,
-  "commons-inbox": () => "`base-url` = `/api/notifications`; add `show-filters` on a full page. On `commons-notification-click`, open the run named by `event.detail.notification.correlationId`, or `actionUrl` when set.",
+  "commons-inbox": (state) => `\`base-url\` = \`/api/notifications\`${({personal: "; `box=\"personal\"` and `hide-tabs` (personal notifications only)", role: "; `box=\"role\"` and `hide-tabs` (role notifications only)"})[state.behavior?.notifications?.scope] ?? ""}; add \`show-filters\` on a full page. On \`commons-notification-click\`, open the run named by \`event.detail.notification.correlationId\` (its conversation, or its tasks), or \`actionUrl\` when set. Keep it visually distinct from the task inbox: this one lists what happened, the task inbox lists work.`,
   "commons-conversation-list": () => "`base-url` = `/api/chat`, property `me` = the user ID, add `searchable`. On `commons-conversation-select`, show `event.detail.conversation.id` in the conversation.",
   "commons-conversation": (state) => `\`base-url\` = \`/api/chat\`, \`conversation-id\`, property \`me\` = the user ID${on(state, "attachment") ? ", and `attachments-url` = `/api/attachments` so an agent's upload requests render as upload cards in the chat" : ""}. It renders streamed agent replies, forms and typing itself; give it a fixed height.`,
   "commons-upload-case": () => "`base-url` = `/api/attachments`, `case-id`, property `me` = the user ID (others see it read-only).",
@@ -399,7 +401,8 @@ ${bullet([
     steps.push({
       title: `Agent: ${w.display}`,
       body: `\`${w.agentVar}\` in agents.bal is a \`workflow:DurableAgent\`: one instance per run, input \`${w.start}\`, one \`chat\` event (MULTI_EVENT)${wf.chat ? `, and a conversation in which it speaks as \`${w.agentId}\`` : ""}. Its activities (activities.bal): ${acts.map((a) => `\`${a.id}\``).join(", ") || "none yet"}.
-Its job: ${wf.purpose || "(describe it)"}
+Its job: ${wf.purpose || "(describe it)"}${wf.chat && wf.greeting?.trim() ? `
+start.bal posts its greeting ("${wf.greeting.trim()}") as soon as the chat opens, and the instructions tell the agent not to greet again.` : ""}
 Rewrite its instructions for that job, keeping the generated rules (act only through tools, one message per person per turn, end a turn with exactly \`[done]\`, answer side questions in plain text). The process, one step per event kind (MESSAGE, FORM_ANSWER, UPLOAD, REMINDER), each naming its tools:
 ${wf.steps.filter(Boolean).map((s, i) => `${i + 1}. ${s}`).join("\n") || "(none yet)"}${wf.approval.on ? `
 \`${wf.approval.activity}\` has an \`approvalPolicy\`: each call waits for ${wf.approval.userRoles.join(" or ") || "a person"} to approve it in the task inbox; a rejection returns their reason to the agent.` : ""}`,
@@ -412,7 +415,7 @@ ${wf.steps.filter(Boolean).map((s, i) => `${i + 1}. ${s}`).join("\n") || "(none 
     steps.push({
       title: `Workflow: ${w.display}`,
       body: `\`${w.fn}\` in workflows.bal waits for its human tasks in order with \`ctx->awaitHumanTask\`, then marks the run DONE:
-${bullet((wf.tasks ?? []).map((t) => `"${t.title || t.name}" for ${t.roles.join(", ") || "anyone"}: its answer type is generated from the task's fields (${t.fields.map((f) => fieldName(f)).join(", ") || "none"}), and the management API turns that type into the form the task form shows.`))}
+${bullet((wf.tasks ?? []).map((t) => `"${t.title || t.name}" for ${t.roles.join(", ") || "anyone"}${t.description ? ` ("${t.description}")` : ""}: it shows ${t.context ? (t.context.join(", ") || "no start fields") : "every start field"} beside the form; its answer type is generated from the task's fields (${t.fields.map((f) => fieldName(f)).join(", ") || "none"}), and the management API turns that type into the form the task form shows.`))}
 Add the real work between the tasks as \`@workflow:Activity\` functions called with \`ctx->callActivity\` (bind the result to a typed variable; \`_ = check ctx->callActivity(...)\` fails type inference). Branch on the answers (e.g. stop when a reviewer rejects). A risky activity can take \`approvalPolicy = {userRoles: ..., title: ...}\`, which puts an approval in the task inbox before it runs.`,
       check: `a run of ${w.display} reaches each task in the inbox, and completing them finishes the run.`
     });

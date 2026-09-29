@@ -3,6 +3,7 @@ Copyright 2026 Hasitha Aravinda
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-It has no third-party code: the page is plain HTML, CSS and JavaScript with no dependencies. The prompts and code it
-generates name third-party software (Ballerina packages, the bal-commons components, identity providers, Docker
-images); each keeps its own license.
+Its own code is plain HTML, CSS and JavaScript with no dependencies. The preview's vendored bundles (vendor/)
+include Lit (BSD-3-Clause, Copyright (c) 2017 Google LLC) and the bal-commons UI packages (Apache-2.0); see
+THIRD_PARTY_NOTICES.md. The prompts and code it generates name third-party software (Ballerina packages, the
+bal-commons components, identity providers, Docker images); each keeps its own license.
